@@ -10,10 +10,17 @@ An automation repository and Android app for building, distributing, and managin
 [![ABK App](https://img.shields.io/github/actions/workflow/status/xingguangcuican6666/ABK/build-abk-app.yml?label=ABK%20App&style=flat-square&logo=android&logoColor=white)](https://github.com/xingguangcuican6666/ABK/actions/workflows/build-abk-app.yml)
 [![KernelSU](https://img.shields.io/badge/KernelSU-Supported-5AA300?style=flat-square)](https://kernelsu.org/)
 [![SUSFS](https://img.shields.io/badge/SUSFS-Integrated-E67E22?style=flat-square)](https://gitlab.com/simonpunk/susfs4ksu)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/xingguangcuican6666/ABK)
 
 [简体中文](README.md) | English
 
 </div>
+
+## Support My Work
+
+If you like this project, please consider buying me a coffee to support its ongoing development!
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/xingguangcuican)
 
 ## Purpose
 
@@ -108,6 +115,16 @@ sukisu=
 ```
 
 An empty value means the latest commit of that branch will be used.
+
+## KSU branch `Latest(最新)` (GKI only)
+
+Applies to every GKI `workflow_dispatch` workflow ([`kernel-custom.yml`](.github/workflows/kernel-custom.yml), [`kernel-a12-5-10.yml`](.github/workflows/kernel-a12-5-10.yml), [`kernel-a13-5-15.yml`](.github/workflows/kernel-a13-5-15.yml), [`kernel-a14-6-1.yml`](.github/workflows/kernel-a14-6-1.yml), [`kernel-a15-6-6.yml`](.github/workflows/kernel-a15-6-6.yml), [`kernel-a16-6-12.yml`](.github/workflows/kernel-a16-6-12.yml), and [`kernel-full-feature-matrix.yml`](.github/workflows/kernel-full-feature-matrix.yml)). The app dispatches [`kernel-custom.yml`](.github/workflows/kernel-custom.yml); on github.com you can also pick **Latest(最新)** when manually running a fixed-version workflow.
+
+On GitHub Actions and the app GKI build screen, **Latest(最新)** sits between **Dev** and **Custom**. [`resolve-ksu-ref.sh`](.github/scripts/resolve-ksu-ref.sh) resolves upstream KernelSU sources at run time:
+
+- **Official / SukiSU / ReSukiSU (GKI):** prefer upstream `main` **HEAD** when that commit has a successful `release.yml` (tag release) or standalone `build-manager.yml` run; kernel and manager share that `head_sha`. Otherwise fall back to the latest successful standalone `build-manager` on `main`. Manager APK via [nightly.link](https://nightly.link/) (`manager.zip` or `Manager-release.zip`); download also checks `release.yml` runs. Latest fails if neither path has a usable green run on `main`.
+
+If manager download fails, the manager job step fails but **the kernel build continues**. Latest does not fall back to `releases/latest` (the Stable/Dev release path).
 
 ## Stock Config
 
@@ -222,11 +239,15 @@ The app is built by the [`Build ABK App`](.github/workflows/build-abk-app.yml) w
 - The workflow currently bundles `arm64-v8a`, `armeabi-v7a`, and `x86_64`; at runtime ABK prefers the APK-bundled `ksud` and falls back to `/data/adb/ksud` or a system `ksud` only when needed.
 - This repository does not check in prebuilt `ksud` binaries. Source, build provenance, and license notes are documented in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
+### Self-hosted runner (optional)
+
+The app build workflows (`Build ABK App` / `Build ABK App (dev)`) pick their runner from the repository variable `APP_RUNNER`. **When unset, both workflows default to the GitHub-hosted `ubuntu-latest`**, so a fork works with no configuration. To build on your own hardware, see [`docs/self-hosted-runner.md`](docs/self-hosted-runner.md).
+
 ## Contributors
 
-The following list is generated from the current git history, showing only identifiable GitHub usernames/links and filtering automation accounts:
+The following list is normalized from the current git history to identifiable GitHub usernames/links and sorted by username. Automation accounts and identities without a reliable mapping are filtered out:
 
-[@TheWildJames](https://github.com/TheWildJames), [@zzh20188](https://github.com/zzh20188), [@xingguangcuican6666](https://github.com/xingguangcuican6666), [@ShirkNeko](https://github.com/ShirkNeko), [@huime180](https://github.com/huime180), [@MiRinChan](https://github.com/MiRinChan), [@FunLay123](https://github.com/FunLay123), [@guruji-byte](https://github.com/guruji-byte), [@Xiaomichael](https://github.com/Xiaomichael), [@DreamFerry](https://github.com/DreamFerry), [@liqideqq](https://github.com/liqideqq), [@elysias123](https://github.com/elysias123), [@Fede2782](https://github.com/Fede2782), [@ReeViiS69](https://github.com/ReeViiS69), [@TheSillyOk](https://github.com/TheSillyOk), [@prpjzz](https://github.com/prpjzz), [@ukriu](https://github.com/ukriu), [@wrnxr233](https://github.com/wrnxr233), [@Tools-cx-app](https://github.com/Tools-cx-app), [@Akuma-Noko](https://github.com/Akuma-Noko), [@DebugBoard](https://github.com/DebugBoard), [@FixeQyt](https://github.com/FixeQyt), [@LX200944](https://github.com/LX200944), [@Starsun](https://github.com/Starsun), [@yx1234587](https://github.com/yx1234587).
+[@Akuma-Noko](https://github.com/Akuma-Noko), [@DebugBoard](https://github.com/DebugBoard), [@DreamFerry](https://github.com/DreamFerry), [@elysias123](https://github.com/elysias123), [@Fede2782](https://github.com/Fede2782), [@FixeQyt](https://github.com/FixeQyt), [@FunLay123](https://github.com/FunLay123), [@gsf114](https://github.com/gsf114), [@guruji-byte](https://github.com/guruji-byte), [@huime180](https://github.com/huime180), [@liqideqq](https://github.com/liqideqq), [@LX200944](https://github.com/LX200944), [@Mazha0309](https://github.com/Mazha0309), [@MiRinChan](https://github.com/MiRinChan), [@prpjzz](https://github.com/prpjzz), [@ReeViiS69](https://github.com/ReeViiS69), [@ShirkNeko](https://github.com/ShirkNeko), [@Starsun](https://github.com/Starsun), [@TheSillyOk](https://github.com/TheSillyOk), [@TheWildJames](https://github.com/TheWildJames), [@Tools-cx-app](https://github.com/Tools-cx-app), [@ukriu](https://github.com/ukriu), [@wrnxr233](https://github.com/wrnxr233), [@Xiaomichael](https://github.com/Xiaomichael), [@xingguangcuican6666](https://github.com/xingguangcuican6666), [@yx1234587](https://github.com/yx1234587), [@zzh20188](https://github.com/zzh20188).
 
 ## Open Source Licenses
 
@@ -236,7 +257,7 @@ The full notice list is maintained in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOT
 
 | Component | Source | License |
 | --- | --- | --- |
-| AnyBase Kernel | [`LICENSE`](LICENSE) | GPL-2.0 |
+| AnyBase Kernel | [`LICENSE`](LICENSE) | GPL-3.0 |
 | ABK Control native bridge | `app/src/main/cpp/uapi/abk_control.h` | GPL-2.0 |
 | xingguang DDK module | `ddk/xingguang-ddk/xingguang_ddk.c` | GPL |
 | DDK kernel API patch | `ddk/patches/xingguang-ddk/0001-xingguang-ddk-api.patch` | GPL-2.0 |
@@ -299,4 +320,4 @@ Web dependencies are derived from `web/package-lock.json`.
 
 ## License
 
-ABK is released under GPL-2.0. This repository also references third-party projects, patches, binary sources, and package dependencies. Before using, redistributing, or modifying them, follow the license and terms of each upstream project. Users are responsible for any device damage, data loss, account risk, service interruption, compliance issue, or direct/indirect loss caused by using ABK, its workflows, custom modules, or generated artifacts.
+ABK is released under GPL-3.0. This repository also references third-party projects, patches, binary sources, and package dependencies. Before using, redistributing, or modifying them, follow the license and terms of each upstream project. Users are responsible for any device damage, data loss, account risk, service interruption, compliance issue, or direct/indirect loss caused by using ABK, its workflows, custom modules, or generated artifacts.

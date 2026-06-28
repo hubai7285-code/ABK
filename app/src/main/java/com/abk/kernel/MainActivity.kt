@@ -3,8 +3,8 @@ package com.abk.kernel
 import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import com.abk.kernel.utils.LocaleHelper
+import com.abk.kernel.utils.findActivity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -16,6 +16,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -45,10 +46,12 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -65,9 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -77,20 +78,24 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import com.abk.kernel.ui.screens.AuthGateScreen
+import com.abk.kernel.ui.components.AppBackgroundHost
+import com.abk.kernel.ui.components.AbkSnackbarHost
+import com.abk.kernel.ui.components.animateBottomNavForChildPage
+import com.abk.kernel.ui.components.showAbkSnackbar
+import com.abk.kernel.extensions.AbkExtensionBootstrapActivity
 import com.abk.kernel.ui.screens.BuildScreen
 import com.abk.kernel.ui.screens.FlashScreen
 import com.abk.kernel.ui.screens.InstalledModulesScreen
 import com.abk.kernel.ui.screens.ModuleRepositoryScreen
+import com.abk.kernel.ui.screens.OobeScreen
 import com.abk.kernel.ui.screens.RootAuthorizationScreen
 import com.abk.kernel.ui.screens.RuntimeHomeScreen
 import com.abk.kernel.ui.screens.SettingsScreen
 import com.abk.kernel.ui.screens.StatusScreen
 import com.abk.kernel.ui.theme.AbkTheme
 import com.abk.kernel.ui.theme.LocalUiSurfaceAlpha
+import com.abk.kernel.ui.theme.appPageBackgroundColor
 import com.abk.kernel.ui.theme.uiSurfaceColor
-import com.abk.kernel.viewmodel.AuthStep
 import com.abk.kernel.viewmodel.MainViewModel
 
 class MainActivity : ComponentActivity() {
@@ -112,10 +117,32 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: MainViewModel = viewModel()
             val state by vm.uiState.collectAsState()
+            var extensionBootstrapIssued by rememberSaveable { mutableStateOf(false) }
+
+            LaunchedEffect(Unit) {
+                vm.checkRoot()
+            }
 
             LaunchedEffect(state.termsAccepted) {
                 if (state.termsAccepted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+
+            LaunchedEffect(state.termsAccepted, state.oobeCompleted) {
+                if (state.termsAccepted && !state.oobeCompleted) {
+                    vm.maybeShowInitialOobe()
+                }
+            }
+
+            LaunchedEffect(state.termsAccepted, state.showOobe, extensionBootstrapIssued) {
+                if (state.termsAccepted && !state.showOobe && !extensionBootstrapIssued) {
+                    extensionBootstrapIssued = true
+                    startActivity(
+                        Intent(this@MainActivity, AbkExtensionBootstrapActivity::class.java).apply {
+                            putExtra("boot_action", "foreground")
+                        }
+                    )
                 }
             }
 
@@ -139,12 +166,32 @@ class MainActivity : ComponentActivity() {
                             onAccept = vm::acceptTerms,
                             onDecline = { finishAffinity() }
                         )
-                        state.authStep != AuthStep.READY -> AuthGateScreen(vm)
-                        else -> AbkMainScaffold(
-                            vm = vm,
-                            pendingModuleInstallUri = pendingModuleInstallUri,
-                            onModuleInstallUriConsumed = { pendingModuleInstallUri = null }
-                        )
+                        else -> Box(modifier = Modifier.fillMaxSize()) {
+                            AbkMainScaffold(
+                                vm = vm,
+                                pendingModuleInstallUri = pendingModuleInstallUri,
+                                onModuleInstallUriConsumed = { pendingModuleInstallUri = null }
+                            )
+                            if (state.showSyncPrompt && !state.showOobe) {
+                                SyncPromptDialog(
+                                    behindBy = state.behindBy,
+                                    onSync = vm::syncFork,
+                                    onDismiss = vm::dismissSyncPrompt
+                                )
+                            }
+                            if (state.showOobe) {
+                                CompositionLocalProvider(LocalUiSurfaceAlpha provides 1f) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .zIndex(4f)
+                                    ) {
+                                        OobeScreen(vm)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -159,33 +206,31 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppBackgroundHost(
-    backgroundUri: String?,
-    backgroundEnabled: Boolean,
-    uiSurfaceAlpha: Float,
-    content: @Composable () -> Unit
+private fun SyncPromptDialog(
+    behindBy: Int,
+    onSync: () -> Unit,
+    onDismiss: () -> Unit
 ) {
-    val hasBackground = backgroundEnabled && !backgroundUri.isNullOrBlank()
-    val colorScheme = MaterialTheme.colorScheme
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colorScheme.surface)
-    ) {
-        if (hasBackground) {
-            AsyncImage(
-                model = backgroundUri,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.sync_title)) },
+        text = {
+            Text(
+                "${stringResource(R.string.sync_desc)}\n\n" +
+                    stringResource(R.string.sync_behind_commits, behindBy)
             )
+        },
+        confirmButton = {
+            Button(onClick = onSync) {
+                Text(stringResource(R.string.sync_action))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.skip))
+            }
         }
-        CompositionLocalProvider(
-            LocalUiSurfaceAlpha provides if (hasBackground) uiSurfaceAlpha.coerceIn(0f, 1f) else 1f
-        ) {
-            content()
-        }
-    }
+    )
 }
 
 @Composable
@@ -195,7 +240,7 @@ private fun TermsAgreementDialog(
 ) {
     val scrollState = rememberScrollState()
     val canAccept by remember {
-        derivedStateOf { scrollState.maxValue > 0 && scrollState.value >= scrollState.maxValue }
+        derivedStateOf { scrollState.maxValue == 0 || scrollState.value >= scrollState.maxValue }
     }
 
     AlertDialog(
@@ -310,6 +355,7 @@ private enum class AbkTab(@StringRes val labelRes: Int) {
     Settings(R.string.nav_settings)
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun AbkMainScaffold(
     vm: MainViewModel,
@@ -318,9 +364,14 @@ private fun AbkMainScaffold(
 ) {
     val state by vm.uiState.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(Unit) {
+        vm.markMainUiEntered()
+    }
+
     var selectedTab by rememberSaveable { mutableStateOf(AbkTab.Status) }
     var flashDetailPageVisible by rememberSaveable { mutableStateOf(false) }
-    var settingsThemePageVisible by rememberSaveable { mutableStateOf(false) }
+    var settingsChildPageVisible by rememberSaveable { mutableStateOf(false) }
     var buildPlanPageVisible by rememberSaveable { mutableStateOf(false) }
     var moduleRepositoryPageVisible by rememberSaveable { mutableStateOf(false) }
     var rootAuthDetailPageVisible by rememberSaveable { mutableStateOf(false) }
@@ -332,6 +383,7 @@ private fun AbkMainScaffold(
             buildList {
                 add(AbkTab.RuntimeHome)
                 if (state.rootGranted) add(AbkTab.InstalledModules)
+                add(AbkTab.Modules)
                 if (runtimeNativeManagerActive) add(AbkTab.RootAuth)
                 add(AbkTab.Settings)
             }
@@ -350,10 +402,29 @@ private fun AbkMainScaffold(
         AbkTab.Build -> buildPlanPageVisible
         AbkTab.Modules -> moduleRepositoryPageVisible
         AbkTab.Flash -> flashDetailPageVisible
-        AbkTab.Settings -> settingsThemePageVisible
+        AbkTab.Settings -> settingsChildPageVisible
         AbkTab.RootAuth -> rootAuthDetailPageVisible
         AbkTab.RuntimeHome -> managerPatchPageVisible
         else -> false
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(state.snackbarMessage, state.snackbarLongDuration, state.error) {
+        when (val snackbar = state.snackbarMessage) {
+            null -> {
+                val error = state.error ?: return@LaunchedEffect
+                snackbarHostState.showAbkSnackbar(message = error, longDuration = true)
+                vm.clearError()
+            }
+            else -> {
+                snackbarHostState.showAbkSnackbar(
+                    message = snackbar,
+                    longDuration = state.snackbarLongDuration,
+                )
+                vm.clearSnackbar()
+                if (state.error != null) vm.clearError()
+            }
+        }
     }
 
     LaunchedEffect(pendingModuleInstallUri) {
@@ -368,21 +439,24 @@ private fun AbkMainScaffold(
             AbkTab.Build -> {
                 moduleRepositoryPageVisible = false
                 flashDetailPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 rootAuthDetailPageVisible = false
                 managerPatchPageVisible = false
             }
             AbkTab.Flash -> {
                 buildPlanPageVisible = false
                 moduleRepositoryPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 rootAuthDetailPageVisible = false
                 managerPatchPageVisible = false
+                // Flash NavHost is recreated on tab entry — clear stale saveable
+                // state so the bottom bar does not hide until a detail opens.
+                flashDetailPageVisible = false
             }
             AbkTab.Modules -> {
                 buildPlanPageVisible = false
                 flashDetailPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 rootAuthDetailPageVisible = false
                 managerPatchPageVisible = false
             }
@@ -397,21 +471,21 @@ private fun AbkMainScaffold(
                 buildPlanPageVisible = false
                 moduleRepositoryPageVisible = false
                 flashDetailPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 managerPatchPageVisible = false
             }
             AbkTab.RuntimeHome -> {
                 buildPlanPageVisible = false
                 moduleRepositoryPageVisible = false
                 flashDetailPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 rootAuthDetailPageVisible = false
             }
             else -> {
                 buildPlanPageVisible = false
                 moduleRepositoryPageVisible = false
                 flashDetailPageVisible = false
-                settingsThemePageVisible = false
+                settingsChildPageVisible = false
                 rootAuthDetailPageVisible = false
                 managerPatchPageVisible = false
             }
@@ -438,10 +512,19 @@ private fun AbkMainScaffold(
         BackHandler(onBack = ::handleTopLevelBack)
     }
 
+    val navProgressAnim = remember { Animatable(1f) }
+    LaunchedEffect(childPageVisible) {
+        navProgressAnim.animateBottomNavForChildPage(
+            childPageVisible = childPageVisible,
+            motionScheme = motionScheme,
+        )
+    }
+    val navProgress = navProgressAnim.value
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(uiSurfaceColor(MaterialTheme.colorScheme.surface))
+            .background(appPageBackgroundColor(uiSurfaceColor(MaterialTheme.colorScheme.surface)))
     ) {
         Box(
             modifier = Modifier
@@ -449,6 +532,11 @@ private fun AbkMainScaffold(
                 .align(Alignment.BottomCenter)
                 .onSizeChanged { bottomBarHeightPx = it.height }
                 .zIndex(if (childPageVisible) 0f else 2f)
+                .graphicsLayer {
+                    val hidden = 1f - navProgress
+                    translationY = hidden * bottomBarHeightPx
+                    alpha = 1f - (hidden * 0.15f)
+                }
         ) {
             NavigationBar(
                 containerColor = uiSurfaceColor(MaterialTheme.colorScheme.surfaceContainer),
@@ -530,10 +618,16 @@ private fun AbkMainScaffold(
                         AbkTab.Build -> BuildScreen(
                             vm = vm,
                             outerPadding = contentPadding,
-                            onPlanPageVisibleChange = { buildPlanPageVisible = it }
+                            onPlanPageVisibleChange = { buildPlanPageVisible = it },
+                            onNavigateToStatus = { selectedTab = AbkTab.Status }
                         )
                         AbkTab.Modules -> ModuleRepositoryScreen(
                             vm = vm,
+                            mode = if (state.runtimeNavigationEnabled) {
+                                com.abk.kernel.ui.screens.ModuleRepositoryMode.RUNTIME_STANDARD
+                            } else {
+                                com.abk.kernel.ui.screens.ModuleRepositoryMode.BUILD_ABK
+                            },
                             outerPadding = contentPadding,
                             onRepositoryPageVisibleChange = { moduleRepositoryPageVisible = it }
                         )
@@ -562,7 +656,7 @@ private fun AbkMainScaffold(
                         AbkTab.Settings -> SettingsScreen(
                             vm = vm,
                             outerPadding = contentPadding,
-                            onThemePageVisibleChange = { settingsThemePageVisible = it },
+                            onChildPageVisibleChange = { settingsChildPageVisible = it },
                             onOpenInstalledModules = {
                                 if (!state.runtimeNavigationEnabled) vm.setRuntimeNavigationEnabled(true)
                                 selectedTab = if (state.rootGranted) {
@@ -576,6 +670,15 @@ private fun AbkMainScaffold(
                 }
             }
         }
+        AbkSnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(
+                    bottom = with(density) { (bottomBarHeightPx * navProgress).toDp() } + 10.dp
+                )
+                .zIndex(4f)
+        )
     }
 }
 
@@ -619,12 +722,6 @@ private fun isLikelyModuleZipIntent(mimeType: String?, uri: Uri): Boolean {
     val cleanMime = mimeType?.lowercase().orEmpty()
     val path = uri.toString().lowercase()
     return cleanMime in MODULE_ZIP_MIME_TYPES || path.endsWith(".zip")
-}
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
 }
 
 private const val EXIT_BACK_INTERVAL_MS = 2_000L

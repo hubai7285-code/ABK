@@ -2,8 +2,8 @@
 
 package com.abk.kernel.ui.theme
 
-import android.app.Activity
 import android.os.Build
+import com.abk.kernel.utils.findActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialExpressiveTheme
@@ -24,12 +24,17 @@ import com.google.android.material.color.utilities.CorePalette
 import com.google.android.material.color.utilities.TonalPalette
 
 val LocalUiSurfaceAlpha = staticCompositionLocalOf { 1f }
+val LocalAppBackgroundEnabled = staticCompositionLocalOf { false }
 
 @Composable
 fun uiSurfaceColor(color: Color): Color {
     val alpha = LocalUiSurfaceAlpha.current
     return if (alpha >= 0.995f) color else color.copy(alpha = color.alpha * alpha)
 }
+
+@Composable
+fun appPageBackgroundColor(color: Color): Color =
+    if (LocalAppBackgroundEnabled.current) Color.Transparent else color
 
 @Composable
 fun AbkTheme(
@@ -59,9 +64,10 @@ fun AbkTheme(
     }
 
     val view = LocalView.current
-    if (!view.isInEditMode) {
+    val activity = context.findActivity()
+    if (activity != null && !view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            val window = activity.window
             window.statusBarColor = colorScheme.surface.toArgb()
             window.navigationBarColor = colorScheme.surface.toArgb()
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme

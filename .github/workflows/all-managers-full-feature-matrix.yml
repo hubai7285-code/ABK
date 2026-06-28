@@ -28,6 +28,7 @@ on:
         options:
           - Stable(标准)
           - Dev(开发)
+          - Latest(最新)
           - Custom(自定义)
         default: Dev(开发)
       version:
@@ -56,17 +57,17 @@ on:
         type: boolean
         default: true
       use_zram:
-        description: "GKI 启用 ZRAM 增强算法（6.12 会自动关闭）"
+        description: "GKI 启用 ZRAM 增强算法（6.12 跳过 legacy LZ4K 栈）"
         required: false
         type: boolean
         default: true
       zram_full_algo:
-        description: "GKI 启用 ZRAM 完整算法支持（6.12 会自动关闭）"
+        description: "GKI 启用 ZRAM 完整算法支持（6.12 自动跳过 legacy LZ4K/LZ4KD/LZ4K_OPLUS）"
         required: false
         type: boolean
         default: true
       zram_extra_algos:
-        description: "GKI 自定义 ZRAM 算法（逗号分隔，仅未启用完整算法时生效）"
+        description: "GKI 自定义 ZRAM 算法（逗号分隔，如 lzo,lz4,deflate,zstd；6.12 会忽略 lz4k/lz4kd/lz4k_oplus）"
         required: false
         type: string
         default: ""
@@ -115,14 +116,14 @@ on:
           - "678"
           - "123"
           - "345"
-        default: "off"
+        default: "on"
       use_custom_external_modules:
         description: "GKI 启用自定义外部模块注入"
         required: false
         type: boolean
         default: false
       custom_external_modules:
-        description: "GKI 自定义外部模块（repo;stage|repo;stage）"
+        description: "GKI 自定义外部模块（兼容旧 repo;stage，也支持 module:repo;stage 与 set:repo#child;stage，用 | 分隔）"
         required: false
         type: string
         default: ""
@@ -135,7 +136,7 @@ on:
         description: "OnePlus 专属开关 JSON；留空或 {} 使用默认"
         required: false
         type: string
-        default: '{"enable_susfs":false,"use_kpm":false,"use_lz4kd":false,"use_bbg":true,"use_bbr":false,"use_proxy_optimization":true,"use_unicode_bypass":false}'
+        default: '{"enable_susfs":true,"use_kpm":true,"use_lz4kd":true,"use_bbg":true,"use_bbr":true,"use_proxy_optimization":true,"use_unicode_bypass":true}'
 
 jobs:
   prepare-variant-matrix:

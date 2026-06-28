@@ -131,6 +131,14 @@ on:
         default: false
 
 jobs:
+  get-manager:
+    name: 上传管理器和 SUSFS 模块
+    if: ${{ inputs.ksu_variant != 'None' }}
+    uses: ./.github/workflows/get-manager.yml
+    secrets: inherit
+    with:
+      kernelsu_variant: ${{ inputs.ksu_variant }}
+
   build-oneplus-kernel:
     name: "${{ inputs.device_manifest }}-${{ inputs.kernel_version }}-${{ inputs.ksu_variant }}"
     uses: ./.github/workflows/oneplus-build.yml

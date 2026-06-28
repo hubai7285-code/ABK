@@ -96,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.abk.kernel.R
 import com.abk.kernel.ui.components.AbkScreenHorizontalPadding
+import com.abk.kernel.ui.components.AppPageBackground
 import com.abk.kernel.ui.components.ExpressiveListItem
 import com.abk.kernel.ui.components.ExpressiveTopBar
 import com.abk.kernel.ui.theme.uiSurfaceColor
@@ -134,6 +135,9 @@ fun AbkRootPatchScreen(
     val defaultPartition by produceState(initialValue = "boot", context, rootGranted) {
         value = withContext(Dispatchers.IO) { RootUtils.detectDefaultBootPartition() }
     }
+    val supportsAnyKernelInactiveSlot by produceState(initialValue = false, context, rootGranted) {
+        value = withContext(Dispatchers.IO) { RootUtils.supportsAnyKernelInactiveSlot() }
+    }
 
     var selectedMode by rememberSaveable { mutableStateOf<LkmPatchInstallMode?>(null) }
     var selectedVariant by rememberSaveable(runtimeVariant) {
@@ -162,6 +166,10 @@ fun AbkRootPatchScreen(
     var selectedAnyKernelName by rememberSaveable { mutableStateOf("") }
     var selectedLocalLkmPath by rememberSaveable { mutableStateOf("") }
     var selectedLocalLkmName by rememberSaveable { mutableStateOf("") }
+    var selectedAnyKernelSlotTargetName by rememberSaveable {
+        mutableStateOf(RootUtils.Ak3SlotTarget.CURRENT.name)
+    }
+    var showAnyKernelSlotMenu by remember { mutableStateOf(false) }
     var selectedPartition by rememberSaveable { mutableStateOf(defaultPartition) }
     var hasCustomPartitionSelection by rememberSaveable { mutableStateOf(false) }
     var showPartitionMenu by remember { mutableStateOf(false) }
@@ -177,9 +185,6 @@ fun AbkRootPatchScreen(
     val userlandKsudPath by produceState<String?>(initialValue = null, context) {
         value = withContext(Dispatchers.IO) { RootUtils.resolveUserlandKsudPath(context) }
     }
-    val userlandMagiskbootPath by produceState<String?>(initialValue = null, context) {
-        value = withContext(Dispatchers.IO) { RootUtils.resolveUserlandMagiskbootPath(context) }
-    }
     val hasLocalLkm = selectedLocalLkmPath.isNotBlank()
     val activeLkmLabel = selectedLocalLkmName.takeIf { it.isNotBlank() }
         ?: selectedAsset?.let { "${it.variantLabel} · ${it.kmi}" }
@@ -187,11 +192,10 @@ fun AbkRootPatchScreen(
     val hasLkmSource = hasLocalLkm || selectedAsset != null
     val showRootInstallModes = rootGranted
     val hasUserlandKsud = userlandKsudPath != null
-    val hasUserlandMagiskboot = userlandMagiskbootPath != null
     val canPatchSelectedFile = selectedBootPath.isNotBlank() &&
         hasLkmSource &&
         !running &&
-        (rootGranted || (hasUserlandKsud && hasUserlandMagiskboot))
+        (rootGranted || hasUserlandKsud)
     val canDirectInstall = rootGranted && hasLkmSource && !running
     val canFlashAnyKernel3 = rootGranted && selectedAnyKernelPath.isNotBlank() && !running
     val canProceed = when (selectedMode) {
@@ -209,6 +213,10 @@ fun AbkRootPatchScreen(
     val actionFlashPatchedImage = stringResource(R.string.root_patch_action_flash_patched_image)
     val selectFileDesc = stringResource(R.string.root_patch_select_file_desc)
     val anyKernelDesc = stringResource(R.string.root_patch_anykernel_desc)
+    val anyKernelSlotTitle = stringResource(R.string.root_patch_ak3_slot_title)
+    val anyKernelSlotDesc = stringResource(R.string.root_patch_ak3_slot_desc)
+    val anyKernelCurrentSlotLabel = stringResource(R.string.root_patch_ak3_slot_current)
+    val anyKernelInactiveSlotLabel = stringResource(R.string.root_patch_ak3_slot_inactive)
     val localLkmDesc = stringResource(R.string.root_patch_local_lkm_desc)
     val noLkmAvailable = stringResource(R.string.root_patch_no_lkm_available)
     val defaultPartitionLabel = stringResource(R.string.root_patch_default_label)
@@ -218,6 +226,9 @@ fun AbkRootPatchScreen(
     }
     val localLkmSubtitle = selectedLocalLkmName.ifBlank { currentBuiltinLkm ?: localLkmDesc }
     val activeLkmLogLabel = activeLkmLabel.ifBlank { lkmFallbackLabel }
+    val selectedAnyKernelSlotTarget = runCatching {
+        RootUtils.Ak3SlotTarget.valueOf(selectedAnyKernelSlotTargetName)
+    }.getOrDefault(RootUtils.Ak3SlotTarget.CURRENT)
 
     LaunchedEffect(selectedVariant, kmiOptions, currentKmi, hasCustomKmiSelection) {
         val preferredKmi = preferredLkmKmiSelection(
@@ -253,6 +264,12 @@ fun AbkRootPatchScreen(
             success = null
             currentAction = ""
             logLines = emptyList()
+        }
+    }
+
+    LaunchedEffect(supportsAnyKernelInactiveSlot) {
+        if (!supportsAnyKernelInactiveSlot) {
+            selectedAnyKernelSlotTargetName = RootUtils.Ak3SlotTarget.CURRENT.name
         }
     }
 
@@ -405,12 +422,24 @@ fun AbkRootPatchScreen(
             action = actionFlashAnyKernel,
             lines = listOf(
                 "${'$'} flash AnyKernel3",
-                context.getString(R.string.root_patch_log_file, selectedAnyKernelPath)
+                context.getString(R.string.root_patch_log_file, selectedAnyKernelPath),
+                context.getString(
+                    R.string.root_patch_log_slot,
+                    when (selectedAnyKernelSlotTarget) {
+                        RootUtils.Ak3SlotTarget.INACTIVE -> anyKernelInactiveSlotLabel
+                        RootUtils.Ak3SlotTarget.CURRENT -> anyKernelCurrentSlotLabel
+                    }
+                )
             )
         )
         scope.launch {
             val result = withContext(Dispatchers.IO) {
-                RootUtils.flashAnyKernel3(context, selectedAnyKernelPath, ::appendLog)
+                RootUtils.flashAnyKernel3(
+                    context,
+                    selectedAnyKernelPath,
+                    targetSlot = selectedAnyKernelSlotTarget,
+                    onOutput = ::appendLog
+                )
             }
             running = false
             success = result.success
@@ -533,6 +562,64 @@ fun AbkRootPatchScreen(
                             anyKernelPicker.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
                         }
                     )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = selectedMode == LkmPatchInstallMode.AnyKernel3 && supportsAnyKernelInactiveSlot,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                PatchGroupCard {
+                    androidx.compose.foundation.layout.Box {
+                        ExpressiveListItem(
+                            title = anyKernelSlotTitle,
+                            subtitle = anyKernelSlotDesc,
+                            leadingIcon = Icons.Default.Edit,
+                            enabled = !running,
+                            trailingContent = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = when (selectedAnyKernelSlotTarget) {
+                                            RootUtils.Ak3SlotTarget.INACTIVE -> anyKernelInactiveSlotLabel
+                                            RootUtils.Ak3SlotTarget.CURRENT -> anyKernelCurrentSlotLabel
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        textAlign = TextAlign.End,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Icon(
+                                        Icons.Default.ChevronRight,
+                                        contentDescription = anyKernelSlotTitle
+                                    )
+                                }
+                            },
+                            onClick = { showAnyKernelSlotMenu = true }
+                        )
+                        DropdownMenu(
+                            expanded = showAnyKernelSlotMenu,
+                            onDismissRequest = { showAnyKernelSlotMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(anyKernelCurrentSlotLabel) },
+                                onClick = {
+                                    selectedAnyKernelSlotTargetName = RootUtils.Ak3SlotTarget.CURRENT.name
+                                    showAnyKernelSlotMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(anyKernelInactiveSlotLabel) },
+                                onClick = {
+                                    selectedAnyKernelSlotTargetName = RootUtils.Ak3SlotTarget.INACTIVE.name
+                                    showAnyKernelSlotMenu = false
+                                }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -698,11 +785,8 @@ fun AbkRootPatchScreen(
             if (!hasLkmSource && selectedMode != LkmPatchInstallMode.AnyKernel3) {
                 InlineWarning(stringResource(R.string.root_patch_warn_no_lkm))
             }
-            if (selectedMode == LkmPatchInstallMode.SelectFile && !rootGranted) {
-                when {
-                    !hasUserlandKsud -> InlineWarning(stringResource(R.string.root_patch_warn_no_ksud))
-                    !hasUserlandMagiskboot -> InlineWarning(stringResource(R.string.root_patch_warn_no_magiskboot))
-                }
+            if (selectedMode == LkmPatchInstallMode.SelectFile && !rootGranted && !hasUserlandKsud) {
+                InlineWarning(stringResource(R.string.root_patch_warn_no_ksud))
             }
 
             Button(
@@ -755,32 +839,10 @@ private fun LkmPatchPageBackground(
     backgroundUri: String?,
     backgroundImageEnabled: Boolean
 ) {
-    val colorScheme = MaterialTheme.colorScheme
-    val hasBackground = backgroundImageEnabled && !backgroundUri.isNullOrBlank()
-    val scrimColor = if (colorScheme.surface.luminance() > 0.5f) {
-        colorScheme.surface.copy(alpha = 0.28f)
-    } else {
-        Color.Black.copy(alpha = 0.38f)
-    }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colorScheme.surface)
-    ) {
-        if (hasBackground) {
-            AsyncImage(
-                model = backgroundUri,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(scrimColor)
-            )
-        }
-    }
+    AppPageBackground(
+        backgroundUri = backgroundUri,
+        backgroundImageEnabled = backgroundImageEnabled
+    )
 }
 
 @Composable
