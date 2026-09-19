@@ -5,10 +5,15 @@ The upstream OnePlus manifest pulls the kernel source from the `origin` remote
 (`https://github.com/OnePlusOSS`). For a few devices ABK builds a patched fork
 with extra local commits, and the build must use that fork instead of upstream.
 
-Only the kernel body projects (`kernel_platform/common` and
-`kernel_platform/msm-kernel`) are redirected. The devicetree / modules project
-and every CodeLinaro (`clo-la`) project stay untouched, because the fork does
-not host them and their revisions are pinned to upstream commits.
+Redirected projects are the kernel body (`kernel_platform/common` and
+`kernel_platform/msm-kernel`) plus the devicetree / modules project
+(`path="./"`). Every CodeLinaro (`clo-la`) project stays untouched: the fork
+does not host them and their revisions are pinned to upstream commits.
+
+The manifest keeps its `origin` remote definition, so every project that is not
+listed in OVERRIDES still resolves to upstream. Redirected projects are moved to
+a dedicated `abk-custom-kernel` remote (`https://github.com/hubai7285-code`)
+instead, which keeps the fork location in one place.
 
 The revision follows the upstream manifest by default (upstream branch names are
 mirrored in the fork, e.g. `oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra`), so the
@@ -34,8 +39,14 @@ CUSTOM_REMOTE = "abk-custom-kernel"
 # upstream project name -> (fork project name, fallback revision)
 OVERRIDES: dict[str, tuple[str, str]] = {
     # OnePlus Ace 5 Ultra (mt6991, android16 / 6.6)
+    # kernel body -> kernel_platform/common + kernel_platform/msm-kernel
     "android_kernel_oneplus_mt6991": (
         "android_kernel_oneplus_mt6991v1",
+        "oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra",
+    ),
+    # kernel modules + devicetree -> ./
+    "android_kernel_modules_and_devicetree_oneplus_mt6991": (
+        "android_kernel_modules_and_devicetree_oneplus_mt6991",
         "oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra",
     ),
 }
