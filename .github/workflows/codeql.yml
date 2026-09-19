@@ -56,11 +56,28 @@ jobs:
 
       - name: Set up Android SDK
         if: ${{ matrix.language == 'java-kotlin' || matrix.language == 'c-cpp' }}
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        if: ${{ matrix.language == 'java-kotlin' || matrix.language == 'c-cpp' }}
-        run: sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.22.1" "ndk;28.2.13676358"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_SDK_ROOT="$RUNNER_TEMP/android-sdk"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          # 手动安装 command-line tools 并安装所需组件，避免使用已失效的 android-actions/setup-android@v3
+          # (该 action 会执行 `sdkmanager tools`，而 Google 已移除 legacy 'tools' 包，导致 step 失败)
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/cmdtools.zip"
+          unzip -q "$RUNNER_TEMP/cmdtools.zip" -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --channel=3 \
+            "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.22.1" "ndk;28.2.13676358"
+          {
+            echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
+            echo "$ANDROID_SDK_ROOT/platform-tools"
+            echo "$ANDROID_SDK_ROOT/build-tools/37.0.0"
+            echo "$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+          } >> "$GITHUB_PATH"
 
       - name: Set up Gradle
         if: ${{ matrix.language == 'java-kotlin' || matrix.language == 'c-cpp' }}
