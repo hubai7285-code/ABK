@@ -76,6 +76,25 @@ jobs:
       USE_PROXY_OPTIMIZATION: ${{ inputs.use_proxy_optimization }}
       USE_UNICODE_BYPASS: ${{ inputs.use_unicode_bypass }}
       USE_FENGCHI: ${{ inputs.use_fengchi }}
+      SUB_LEVEL: ${{ inputs.sub_level }}
+      OS_PATCH_LEVEL: ${{ inputs.os_patch_level }}
+      REVISION: ${{ inputs.revision }}
+      KSU_BRANCH: ${{ inputs.kernelsu_branch }}
+      CUSTOM_REF: ${{ inputs.custom_ref }}
+      ABK_VERSION: ${{ inputs.version }}
+      BUILD_TIME: ${{ inputs.build_time }}
+      VIRTUALIZATION_SUPPORT: ${{ inputs.virtualization_support }}
+      USE_ZRAM: ${{ inputs.use_zram }}
+      USE_DDK: ${{ inputs.use_ddk }}
+      USE_NTSYNC: ${{ inputs.use_ntsync }}
+      USE_NETWORKING: ${{ inputs.use_networking }}
+      USE_REKERNEL: ${{ inputs.use_rekernel }}
+      SUPP_OP: ${{ inputs.supp_op }}
+      ZRAM_FULL_ALGO: ${{ inputs.zram_full_algo }}
+      ZRAM_EXTRA_ALGOS: ${{ inputs.zram_extra_algos }}
+      KPM_PASSWORD: ${{ inputs.kpm_password }}
+      CUSTOM_EXTERNAL_MODULES: ${{ inputs.custom_external_modules }}
+      CUSTOM_KERNEL_OPTIONS: ${{ inputs.custom_kernel_options }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
@@ -218,6 +237,17 @@ jobs:
           fi
           if [ "$USE_LZ4KD" = "true" ] && [ "$KERNEL_VERSION" != "5.10" ] && [ "$KERNEL_VERSION" != "5.15" ] && [ "$KERNEL_VERSION" != "6.1" ] && [ "$KERNEL_VERSION" != "6.6" ]; then
             echo "::warning::当前 OnePlus 内核版本不在 lz4kd 支持矩阵内，已关闭 lz4kd。"
+          fi
+
+      - name: 检查 OnePlus 不支持的选项
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$VIRTUALIZATION_SUPPORT" != "off" ]; then
+            echo "::warning::OnePlus 内核树当前不包含 GKI 虚拟化支持补丁 (virtualization_support), 该选项将被忽略。"
+          fi
+          if [ "$SUPP_OP" = "true" ]; then
+            echo "::warning::OnePlus 内核树当前不包含一加 8E 支持补丁 (supp_op), 该选项将被忽略。"
           fi
 
       - name: 最大化构建空间
@@ -507,6 +537,61 @@ jobs:
           rm -f "$COMMON_ROOT"/android/abi_gki_protected_exports_* || true
           rm -f "$KPLATFORM"/msm-kernel/android/abi_gki_protected_exports_* || true
           echo "GKI KMI 保护导出与 defconfig 检查已放开(对齐 build.yml)。"
+
+      - name: 应用自定义内核选项
+        if: ${{ inputs.custom_kernel_options != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          DEFCONFIG_PATH="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
+          test -f "$DEFCONFIG_PATH"
+          python3 - "$DEFCONFIG_PATH" <<'PY'
+          import os, re, sys
+          from pathlib import Path
+          defconfig = Path(sys.argv[1])
+          assigned = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.+)$")
+          disabled = re.compile(r"^#\s*(CONFIG_[A-Za-z0-9_]+)\s+is\s+not\s+set$", re.I)
+          def norm(s):
+              s = s.strip().replace(" ", "")
+              if not s.upper().startswith("CONFIG_"):
+                  s = "CONFIG_" + s
+              return s.upper()
+          text = defconfig.read_text().splitlines()
+          existing = {}
+          for i, l in enumerate(text):
+              m = assigned.match(l)
+              if m:
+                  existing[norm(m.group(1))] = i
+              else:
+                  d = disabled.match(l)
+                  if d:
+                      existing[norm(d.group(1))] = i
+          add = []
+          for line in os.environ.get("CUSTOM_KERNEL_OPTIONS", "").replace("\r", "").splitlines():
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              m = assigned.match(line)
+              if m:
+                  sym, val = norm(m.group(1)), m.group(2).strip()
+              else:
+                  d = disabled.match(line)
+                  if d:
+                      sym, val = norm(d.group(1)), "is not set"
+                  else:
+                      sym, val = norm(line), "y"
+              add.append((sym, val))
+          for sym, val in add:
+              newline = (f"# {sym} is not set" if val == "is not set"
+                        else (f"{sym}=y" if val == "y" else f"{sym}={val}"))
+              if sym in existing:
+                  text[existing[sym]] = newline
+              else:
+                  text.append(newline)
+          defconfig.write_text("\n".join(text) + "\n")
+          print(f"已应用自定义内核选项: {len(add)} 条")
+          PY
 
       - name: 确保 KernelSU ABI 兼容
         if: ${{ inputs.ksu_variant != 'None' }}
@@ -1030,6 +1115,29 @@ jobs:
           fi
           sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
 
+      - name: 设置自定义构建时间
+        if: ${{ inputs.build_time != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          DATESTR="${{ inputs.build_time }}"
+          echo "使用自定义构建时间: $DATESTR"
+          echo "KBUILD_BUILD_TIMESTAMP=$DATESTR" >> "$GITHUB_ENV"
+          f="$COMMON_ROOT/scripts/mkcompile_h"
+          if [ -f "$f" ]; then
+            if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
+              perl -pi -e "s{UTS_VERSION=\"\\\$\(echo \\\$UTS_VERSION \\\$CONFIG_FLAGS \\\$TIMESTAMP \\| cut -b -\\\$UTS_LEN\)\"}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$f"
+            else
+              if grep -q 'UTS_VERSION=' "$f"; then
+                perl -pi -e "s{UTS_VERSION=\"\\\$\\\(.*?\\\)\"}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$f"
+              else
+                perl -0777 -pi -e "s{cat <<EOF}{cat <<EOF\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\" } unless /UTS_VERSION/" "$f"
+              fi
+            fi
+            echo "已写入 mkcompile_h 时间戳: $DATESTR"
+          fi
+
       - name: 编译内核
         shell: bash
         run: |
@@ -1098,6 +1206,9 @@ jobs:
           fi
           cp "$IMAGE_PATH" AnyKernel3/Image
           cp "$IMAGE_PATH" Image
+          if [ -n "${CUSTOM_MODULES_DIR:-}" ]; then
+            find "$CUSTOM_MODULES_DIR" -name '*.ko' -exec cp {} AnyKernel3/ \; 2>/dev/null || true
+          fi
 
           if [ "$EFFECTIVE_KPM" = "true" ]; then
             mkdir -p kpm_patch_temp
@@ -1105,7 +1216,7 @@ jobs:
             curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.13.0/patch_linux
             chmod +x patch_linux
             cp "$WORKSPACE/AnyKernel3/Image" ./Image
-            ./patch_linux
+            if [ -n "$KPM_PASSWORD" ]; then ./patch_linux -s "$KPM_PASSWORD"; else ./patch_linux; fi
             mv oImage "$WORKSPACE/AnyKernel3/Image"
             cd "$WORKSPACE"
             rm -rf kpm_patch_temp
