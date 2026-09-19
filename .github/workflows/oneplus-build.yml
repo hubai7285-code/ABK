@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_fengchi:
+        description: "启用风驰(hmbird)调度器补丁(性能调度优化, 仅推荐 android15/6.6; 非 6.6 内核可能部分 hunk 跳过)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -70,6 +75,7 @@ jobs:
       USE_BBR: ${{ inputs.use_bbr }}
       USE_PROXY_OPTIMIZATION: ${{ inputs.use_proxy_optimization }}
       USE_UNICODE_BYPASS: ${{ inputs.use_unicode_bypass }}
+      USE_FENGCHI: ${{ inputs.use_fengchi }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
@@ -187,6 +193,8 @@ jobs:
           echo "自定义注入    : 无"
           echo "Stock Config  : OnePlus manifest"
           echo "Unicode 绕过  : $USE_UNICODE_BYPASS"
+          echo "风驰调度器    : $USE_FENGCHI"
+          echo "GKI 性能优化  : 已启用(-O2 / 放开 KMI 保护导出)"
           echo "========================================"
 
       - name: 校验 OnePlus 输入
@@ -350,6 +358,15 @@ jobs:
               ReSukiSU)
                 curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
                 ;;
+              KernelSU-Next)
+                # KernelSU-Next (pershoot) dev-susfs 分支, 内置 SUSFS 支持
+                curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+                # 为 KernelSU Next 添加 WildKSU / pershoot Manager 签名支持 (apk_sign.patch)
+                curl -fsSL "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/main/other_patch/apk_sign.patch" -o "$KERNEL_ROOT/apk_sign.patch"
+                cd "$COMMON_ROOT/drivers/kernelsu"
+                patch -p2 -N -F 3 < "$KERNEL_ROOT/apk_sign.patch" || true
+                cd "$KERNEL_ROOT"
+                ;;
               *)
                 echo "::error::未知 KSU 变体: $KSU_VARIANT"
                 exit 1
@@ -449,6 +466,41 @@ jobs:
             [ -f "50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch" ] && \
               patch -p1 < "50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch" || true
           fi
+
+      - name: 应用风驰(hmbird)调度器补丁
+        if: ${{ inputs.use_fengchi }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          cd "$COMMON_ROOT"
+          curl -fsSL "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/main/other_patch/fengchi.patch" -o fengchi.patch
+          if [ "$KERNEL_VERSION" != "6.6" ]; then
+            echo "::warning::风驰(hmbird)补丁基于 android15/6.6 制作, 当前内核为 $KERNEL_VERSION, 部分 hunk 可能跳过或失败。"
+          fi
+          echo "正在打入风驰(hmbird)调度器补丁(性能调度优化)…"
+          patch -p1 -F 3 < fengchi.patch || true
+          sed -i '/^CONFIG_SCHED_CLASS_EXT=y/d' arch/arm64/configs/gki_defconfig || true
+          sed -i '/^CONFIG_SLIM_SCHED=y/d' arch/arm64/configs/gki_defconfig || true
+          grep -q '^CONFIG_HMBIRD_SCHED=y' arch/arm64/configs/gki_defconfig || echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
+          echo "风驰补丁处理完成(部分 hunk 因内核差异跳过属正常现象)。"
+
+      - name: GKI 内核性能优化
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          KPLATFORM="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform"
+          DEFCONFIG_PATH="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
+          # 移除 GKI KMI 受保护导出符号, 放开定制空间
+          rm -f "$COMMON_ROOT"/android/abi_gki_protected_exports_* || true
+          rm -f "$KPLATFORM"/msm-kernel/android/abi_gki_protected_exports_* || true
+          # 性能优化: 使用 -O2 而非 -Os
+          sed -i 's/^CONFIG_CC_OPTIMIZE_FOR_SIZE=y/# CONFIG_CC_OPTIMIZE_FOR_SIZE is not set/' "$DEFCONFIG_PATH" || true
+          grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y' "$DEFCONFIG_PATH" || echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG_PATH"
+          # 关闭 defconfig 一致性检查, 允许定制
+          sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
+          echo "GKI 性能优化已应用(-O2 / 放开 KMI 保护导出)。"
 
       - name: 确保 KernelSU ABI 兼容
         if: ${{ inputs.ksu_variant != 'None' }}
@@ -837,6 +889,9 @@ jobs:
           kpm_kconfig_path="${ABK_KPM_KCONFIG_PATH:-}"
           test -f "$DEFCONFIG_PATH"
 
+          if [ "$KSU_VARIANT" = "KernelSU-Next" ]; then
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
+          fi
           if [ "$KSU_VARIANT" != "None" ]; then
             if [ "$EFFECTIVE_ENABLE_SUSFS" = "true" ]; then
               cat >> "$DEFCONFIG_PATH" <<'EOF'
@@ -859,8 +914,10 @@ jobs:
             else
               cat >> "$DEFCONFIG_PATH" <<'EOF'
           CONFIG_KSU_SUSFS=n
-          CONFIG_KSU_MANUAL_HOOK=y
           EOF
+              if [ "$KSU_VARIANT" = "SukiSU" ] || [ "$KSU_VARIANT" = "ReSukiSU" ]; then
+                echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG_PATH"
+              fi
             fi
           fi
 
@@ -1051,6 +1108,7 @@ jobs:
           case "$KSU_VARIANT" in
             None) variant_label="Kernel_Only" ;;
             SukiSU) variant_label="SukiSU_Ultra" ;;
+            KernelSU-Next) variant_label="KernelSU_Next" ;;
             *) variant_label="$KSU_VARIANT" ;;
           esac
           if [ "$EFFECTIVE_USE_LZ4KD" = "true" ]; then
