@@ -7,6 +7,7 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      # ===== OnePlus 专有: 机型选择 =====
       cpu:
         description: "OnePlus/Oplus CPU 分支"
         required: true
@@ -67,85 +68,45 @@ on:
           - oneplus_nord_ce4_lite_5g
           - oneplus_nord_ce4_b
         default: oneplus_12_b
+
+      # ===== 以下选项与 kernel-custom.yml (GKI 自定义构建) 对齐 =====
+      # 注意: workflow_dispatch 最多 25 个 inputs, 因此 OnePlus 侧省略了
+      # sub_level / os_patch_level / revision (由 OnePlus manifest 决定, 纯元数据)
+      # 与 virtualization_support (OnePlus 内核树无对应补丁);
+      # 这些输入在 oneplus-build.yml 中仍然保留, 供可复用工作流直接调用。
       android_version:
         description: "内核 Android KMI 版本"
         required: true
         type: choice
         options:
-          - android16
-          - android15
-          - android14
-          - android13
           - android12
+          - android13
+          - android14
+          - android15
+          - android16
         default: android14
       kernel_version:
         description: "内核版本"
         required: true
         type: choice
         options:
-          - "6.12"
-          - "6.6"
-          - "6.1"
-          - "5.15"
           - "5.10"
+          - "5.15"
+          - "6.1"
+          - "6.6"
+          - "6.12"
         default: "6.1"
       ksu_variant:
         description: "KernelSU 变体"
         required: true
         type: choice
         options:
+          - None
           - Official
           - SukiSU
           - ReSukiSU
           - KernelSU-Next
-          - None
         default: SukiSU
-      enable_susfs:
-        description: "启用 SUSFS（android14/6.1、android15/6.6、android16/6.12）"
-        required: false
-        type: boolean
-        default: false
-      use_kpm:
-        description: "启用 KPM（仅 SukiSU/ReSukiSU）"
-        required: false
-        type: boolean
-        default: false
-      use_lz4kd:
-        description: "启用 lz4kd"
-        required: false
-        type: boolean
-        default: false
-      use_bbg:
-        description: "启用 BBG 基带防护"
-        required: false
-        type: boolean
-        default: true
-      use_bbr:
-        description: "启用 BBR"
-        required: false
-        type: boolean
-        default: false
-      use_proxy_optimization:
-        description: "启用代理相关网络优化（MTK 请关闭）"
-        required: false
-        type: boolean
-        default: true
-      use_unicode_bypass:
-        description: "启用 Unicode 零宽绕过修复"
-        required: false
-        type: boolean
-        default: false
-      use_fengchi:
-        description: "启用风驰(hmbird)调度器补丁(仅推荐 android15/6.6)"
-        required: false
-        type: boolean
-        default: false
-      # ===== 注意: workflow_dispatch 最多只能定义 25 个 inputs =====
-      # 因此对齐 kernel-custom.yml 时做了合并/取舍:
-      #   - sub_level / os_patch_level / revision: OnePlus 由 manifest 决定, 仅元数据, 不在此暴露
-      #     (oneplus-build.yml 仍保留同名 workflow_call 输入, 供可复用工作流直接调用)
-      #   - virtualization_support / supp_op: OnePlus 内核树无对应补丁, 属无效项, 不在此暴露
-      #   - use_zram + zram_full_algo + zram_extra_algos: 合并为 zram_mode
       kernelsu_branch:
         description: "KSU 分支"
         required: false
@@ -157,7 +118,7 @@ on:
           - Custom(自定义)
         default: Stable(标准)
       custom_ref:
-        description: "自定义引用 (仅 KSU 分支为 Custom 时使用, 可为分支/commit/tag)"
+        description: "自定义引用 (仅在KSU分支为'Custom(自定义)'时使用)"
         required: false
         type: string
         default: ""
@@ -171,11 +132,16 @@ on:
         required: false
         type: string
         default: ""
-      zram_mode:
-        description: "ZRAM 模式: off | enhanced | full | custom:lzo,lz4,zstd"
+      use_zram:
+        description: "启用 ZRAM 增强算法"
         required: false
-        type: string
-        default: "off"
+        type: boolean
+        default: false
+      use_bbg:
+        description: "启用 BBG 防格机"
+        required: false
+        type: boolean
+        default: true
       use_ddk:
         description: "启用 DDK 防格机 LSM"
         required: false
@@ -191,13 +157,38 @@ on:
         required: false
         type: boolean
         default: false
+      use_kpm:
+        description: "启用 KPM 功能（仅 SukiSU/ReSukiSU）"
+        required: false
+        type: boolean
+        default: false
       use_rekernel:
         description: "启用 Re-Kernel 驱动"
         required: false
         type: boolean
         default: false
+      cancel_susfs:
+        description: "禁用 SUSFS（取消勾选=启用 SUSFS；仅 android14/6.1、android15/6.6、android16/6.12 支持）"
+        required: false
+        type: boolean
+        default: false
+      supp_op:
+        description: "启用一加 8E 支持（OnePlus 树通常已内置，无独立补丁时自动跳过）"
+        required: false
+        type: boolean
+        default: false
+      zram_full_algo:
+        description: "启用 ZRAM 完整算法支持（6.12 自动跳过 legacy LZ4K/LZ4KD/LZ4K_OPLUS）"
+        required: false
+        type: boolean
+        default: false
+      zram_extra_algos:
+        description: "自定义 ZRAM 算法（逗号分隔，如 lzo,lz4,deflate,zstd,lz4kd；6.12 会忽略 lz4k/lz4kd/lz4k_oplus）"
+        required: false
+        type: string
+        default: ""
       kpm_password:
-        description: "自定义 KPM 超级密码（留空=默认）"
+        description: "自定义 KPM 超级密码（留空=使用默认密码）"
         required: false
         type: string
         default: ""
@@ -211,6 +202,18 @@ on:
         required: false
         type: string
         default: ""
+
+      # ===== OnePlus 专有: 风驰调度器 / Unicode 绕过 =====
+      use_fengchi:
+        description: "启用风驰(hmbird)调度器补丁(仅推荐 android15/6.6)"
+        required: false
+        type: boolean
+        default: false
+      use_unicode_bypass:
+        description: "启用 Unicode 零宽绕过修复"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   get-manager:
@@ -233,23 +236,24 @@ jobs:
       android_version: ${{ inputs.android_version }}
       kernel_version: ${{ inputs.kernel_version }}
       ksu_variant: ${{ inputs.ksu_variant }}
-      enable_susfs: ${{ inputs.enable_susfs }}
-      use_kpm: ${{ inputs.use_kpm }}
-      use_lz4kd: ${{ inputs.use_lz4kd }}
-      use_bbg: ${{ inputs.use_bbg }}
-      use_bbr: ${{ inputs.use_bbr }}
-      use_proxy_optimization: ${{ inputs.use_proxy_optimization }}
-      use_unicode_bypass: ${{ inputs.use_unicode_bypass }}
-      use_fengchi: ${{ inputs.use_fengchi }}
       kernelsu_branch: ${{ inputs.kernelsu_branch }}
-      custom_ref: ${{ inputs.custom_ref }}
-      version: ${{ inputs.version }}
-      build_time: ${{ inputs.build_time }}
-      zram_mode: ${{ inputs.zram_mode }}
+      custom_ref: ${{ inputs.custom_ref || '' }}
+      version: ${{ inputs.version || '' }}
+      build_time: ${{ inputs.build_time || '' }}
+      use_zram: ${{ inputs.use_zram }}
+      use_bbg: ${{ inputs.use_bbg }}
       use_ddk: ${{ inputs.use_ddk }}
-      use_ntsync: ${{ inputs.use_ntsync }}
-      use_networking: ${{ inputs.use_networking }}
-      use_rekernel: ${{ inputs.use_rekernel }}
-      kpm_password: ${{ inputs.kpm_password }}
-      custom_external_modules: ${{ inputs.custom_external_modules }}
-      custom_kernel_options: ${{ inputs.custom_kernel_options }}
+      use_ntsync: ${{ inputs.use_ntsync || false }}
+      use_networking: ${{ inputs.use_networking || false }}
+      use_kpm: ${{ inputs.use_kpm }}
+      use_rekernel: ${{ inputs.use_rekernel || false }}
+      cancel_susfs: ${{ inputs.cancel_susfs }}
+      enable_susfs: ${{ !inputs.cancel_susfs }}
+      supp_op: ${{ inputs.supp_op || false }}
+      zram_full_algo: ${{ inputs.zram_full_algo || false }}
+      zram_extra_algos: ${{ inputs.zram_extra_algos || '' }}
+      kpm_password: ${{ inputs.kpm_password || '' }}
+      custom_external_modules: ${{ inputs.custom_external_modules || '' }}
+      custom_kernel_options: ${{ inputs.custom_kernel_options || '' }}
+      use_fengchi: ${{ inputs.use_fengchi }}
+      use_unicode_bypass: ${{ inputs.use_unicode_bypass }}
