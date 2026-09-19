@@ -96,11 +96,11 @@ on:
         required: false
         type: string
         default: "off"
-      use_zram:
-        description: "启用 ZRAM 增强算法"
+      zram_mode:
+        description: "ZRAM 模式: off | enhanced | full | custom:lzo,lz4,zstd (合并原 use_zram/zram_full_algo/zram_extra_algos, 以适配 workflow_dispatch 25 个输入上限)"
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: "off"
       use_ddk:
         description: "启用 DDK 防格机 LSM"
         required: false
@@ -126,16 +126,6 @@ on:
         required: false
         type: boolean
         default: false
-      zram_full_algo:
-        description: "启用 ZRAM 完整算法支持"
-        required: false
-        type: boolean
-        default: false
-      zram_extra_algos:
-        description: "自定义 ZRAM 算法 (逗号分隔, 如 lzo,lz4,deflate,zstd)"
-        required: false
-        type: string
-        default: ""
       kpm_password:
         description: "自定义 KPM 超级密码 (留空=使用默认密码)"
         required: false
@@ -180,14 +170,12 @@ jobs:
       ABK_VERSION: ${{ inputs.version }}
       BUILD_TIME: ${{ inputs.build_time }}
       VIRTUALIZATION_SUPPORT: ${{ inputs.virtualization_support }}
-      USE_ZRAM: ${{ inputs.use_zram }}
+      ZRAM_MODE: ${{ inputs.zram_mode }}
       USE_DDK: ${{ inputs.use_ddk }}
       USE_NTSYNC: ${{ inputs.use_ntsync }}
       USE_NETWORKING: ${{ inputs.use_networking }}
       USE_REKERNEL: ${{ inputs.use_rekernel }}
       SUPP_OP: ${{ inputs.supp_op }}
-      ZRAM_FULL_ALGO: ${{ inputs.zram_full_algo }}
-      ZRAM_EXTRA_ALGOS: ${{ inputs.zram_extra_algos }}
       KPM_PASSWORD: ${{ inputs.kpm_password }}
       CUSTOM_EXTERNAL_MODULES: ${{ inputs.custom_external_modules }}
       CUSTOM_KERNEL_OPTIONS: ${{ inputs.custom_kernel_options }}
@@ -297,9 +285,7 @@ jobs:
           echo "构建时间      : ${BUILD_TIME:-OnePlus upstream}"
           echo "自定义版本    : ${ABK_VERSION:-默认}"
           echo "SUSFS 状态    : $ENABLE_SUSFS"
-          echo "ZRAM 增强     : $USE_ZRAM (lz4kd=$effective_lz4kd)"
-          echo "ZRAM 完整算法 : $ZRAM_FULL_ALGO"
-          echo "ZRAM 额外算法 : ${ZRAM_EXTRA_ALGOS:-lz4kd=$effective_lz4kd}"
+          echo "ZRAM 模式     : ${ZRAM_MODE:-off} (lz4kd=$effective_lz4kd)"
           echo "BBG 补丁      : $USE_BBG"
           echo "DDK LSM       : $USE_DDK"
           echo "NTsync 补丁   : $USE_NTSYNC"
@@ -1281,9 +1267,20 @@ jobs:
             fi
           }
 
-          # ---- ZRAM 增强 (use_zram / zram_full_algo / zram_extra_algos) ----
-          if [ "$USE_ZRAM" = "true" ] || [ "$ZRAM_FULL_ALGO" = "true" ] || [ -n "$ZRAM_EXTRA_ALGOS" ]; then
-            echo "::group::ZRAM 增强"
+          # ---- ZRAM 增强 (zram_mode: off | enhanced | full | custom:<algos>) ----
+          ZRAM_MODE_VALUE="$(printf '%s' "${ZRAM_MODE:-off}" | tr -d ' \r')"
+          ZRAM_MODE_KIND="${ZRAM_MODE_VALUE%%:*}"
+          ZRAM_MODE_ALGOS=""
+          case "$ZRAM_MODE_VALUE" in
+            *:*) ZRAM_MODE_ALGOS="${ZRAM_MODE_VALUE#*:}" ;;
+          esac
+          case "$ZRAM_MODE_KIND" in
+            ""|off|none|false) ZRAM_MODE_KIND="off" ;;
+            enhanced|full|custom) ;;
+            *) echo "::warning::未知 ZRAM 模式: $ZRAM_MODE_VALUE, 已按 off 处理。"; ZRAM_MODE_KIND="off" ;;
+          esac
+          if [ "$ZRAM_MODE_KIND" != "off" ]; then
+            echo "::group::ZRAM 增强 (mode=$ZRAM_MODE_VALUE)"
             add_cfg CONFIG_ZSMALLOC y
             add_cfg CONFIG_ZRAM y
             if [ "$KERNEL_VERSION" != "6.12" ] && [ -f "$GITHUB_WORKSPACE/config/zram.config" ]; then
@@ -1294,7 +1291,7 @@ jobs:
                 esac
               done < "$GITHUB_WORKSPACE/config/zram.config"
             fi
-            if [ "$ZRAM_FULL_ALGO" = "true" ]; then
+            if [ "$ZRAM_MODE_KIND" = "full" ]; then
               if [ "$KERNEL_VERSION" = "6.12" ]; then
                 for s in CONFIG_ZRAM_BACKEND_LZO CONFIG_ZRAM_BACKEND_LZ4 CONFIG_ZRAM_BACKEND_LZ4HC CONFIG_ZRAM_BACKEND_ZSTD CONFIG_ZRAM_BACKEND_DEFLATE CONFIG_ZRAM_BACKEND_842; do
                   add_cfg "$s" y
@@ -1304,8 +1301,8 @@ jobs:
                   add_cfg "$s" y
                 done
               fi
-            elif [ -n "$ZRAM_EXTRA_ALGOS" ]; then
-              IFS=',' read -ra ZRAM_ALGOS <<< "$ZRAM_EXTRA_ALGOS"
+            elif [ "$ZRAM_MODE_KIND" = "custom" ] && [ -n "$ZRAM_MODE_ALGOS" ]; then
+              IFS=',' read -ra ZRAM_ALGOS <<< "$ZRAM_MODE_ALGOS"
               for raw_algo in "${ZRAM_ALGOS[@]}"; do
                 z_algo="$(echo "$raw_algo" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
                 case "$z_algo" in
