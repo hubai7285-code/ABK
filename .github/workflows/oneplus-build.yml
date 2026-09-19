@@ -87,6 +87,11 @@ on:
         required: false
         type: string
         default: ""
+      kernel_suffix:
+        description: "自定义内核后缀 (留空=默认, 开头别加连字符, 勿加空格等影响指令运行的保留字符; 会写入内核版本号与产物名)"
+        required: false
+        type: string
+        default: ""
       build_time:
         description: "自定义构建时间 (可选, N 或留空=当前 UTC)"
         required: false
@@ -174,6 +179,7 @@ jobs:
       KSU_BRANCH: ${{ inputs.kernelsu_branch }}
       CUSTOM_REF: ${{ inputs.custom_ref }}
       ABK_VERSION: ${{ inputs.version }}
+      KERNEL_SUFFIX: ${{ inputs.kernel_suffix }}
       BUILD_TIME: ${{ inputs.build_time }}
       VIRTUALIZATION_SUPPORT: ${{ inputs.virtualization_support }}
       USE_ZRAM: ${{ inputs.use_zram }}
@@ -297,6 +303,7 @@ jobs:
           echo "KSU 自定义引用: ${CUSTOM_REF:-默认}"
           echo "构建时间      : ${BUILD_TIME:-OnePlus upstream}"
           echo "自定义版本    : ${ABK_VERSION:-默认}"
+          echo "内核后缀      : $([ -n "${KERNEL_SUFFIX:-}" ] && echo "-$KERNEL_SUFFIX" || echo '默认')"
           echo "SUSFS 状态    : $ENABLE_SUSFS"
           echo "ZRAM 增强     : $USE_ZRAM (lz4kd=$effective_lz4kd)"
           echo "ZRAM 完整算法 : $ZRAM_FULL_ALGO"
@@ -338,6 +345,14 @@ jobs:
           fi
           if [ "${EFFECTIVE_USE_LZ4KD:-$USE_LZ4KD}" = "true" ] && [ "$KERNEL_VERSION" != "5.10" ] && [ "$KERNEL_VERSION" != "5.15" ] && [ "$KERNEL_VERSION" != "6.1" ] && [ "$KERNEL_VERSION" != "6.6" ]; then
             echo "::warning::当前 OnePlus 内核版本不在 lz4kd 支持矩阵内(5.10/5.15/6.1/6.6)，lz4kd 相关配置可能被内核忽略。"
+          fi
+          if [ -n "${KERNEL_SUFFIX:-}" ]; then
+            case "$KERNEL_SUFFIX" in
+              -*) echo "::warning::自定义内核后缀不应以连字符开头, 构建时会自动去除前导连字符。" ;;
+            esac
+            if printf '%s' "$KERNEL_SUFFIX" | grep -q '[^A-Za-z0-9._+@-]'; then
+              echo "::warning::自定义内核后缀含特殊字符, 建议只用字母/数字/._+-@, 以免影响编译指令与产物名。"
+            fi
           fi
 
       - name: 检查 OnePlus 不支持的选项
@@ -433,15 +448,17 @@ jobs:
             -b "refs/heads/oneplus/${CPU}" \
             -m "${DEVICE_MANIFEST}.xml" \
             --depth=1
+          manifest_path=".repo/manifests/${DEVICE_MANIFEST}.xml"
+          if [ ! -f "$manifest_path" ]; then
+            manifest_path=".repo/manifest.xml"
+          fi
           case "$DEVICE_MANIFEST" in
             oneplus_15|oneplus_15t)
-              manifest_path=".repo/manifests/${DEVICE_MANIFEST}.xml"
-              if [ ! -f "$manifest_path" ]; then
-                manifest_path=".repo/manifest.xml"
-              fi
               python3 "$GITHUB_WORKSPACE/.github/scripts/sanitize-oneplus-manifest.py" "$manifest_path"
               ;;
           esac
+          # 已配置机型的内核源码改指向 ABK 定制 fork（未列出的机型为 no-op）
+          python3 "$GITHUB_WORKSPACE/.github/scripts/redirect-oneplus-kernel-repo.py" "$manifest_path"
           repo_sync_retry() {
             local attempt
             for attempt in 1 2 3; do
@@ -1430,6 +1447,51 @@ jobs:
             echo "::endgroup::"
           fi
 
+      - name: 设置自定义内核后缀（对齐 cctv18）
+        if: ${{ inputs.kernel_suffix != '' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform"
+          COMMON_ROOT="$ROOT/common"
+          SUFFIX="$(printf '%s' "$KERNEL_SUFFIX" | tr -d '[:space:]')"
+          SUFFIX="${SUFFIX#-}"
+          if [ -z "$SUFFIX" ]; then
+            echo "::warning::自定义内核后缀清洗后为空, 跳过。"
+            exit 0
+          fi
+          echo "自定义内核后缀: -$SUFFIX"
+          # 1) 改写 setlocalversion: 去掉 scm 版本注入, 末行固定输出 -<后缀>(cctv18 同款 sed)
+          for f in \
+            "$COMMON_ROOT/scripts/setlocalversion" \
+            "$ROOT/msm-kernel/scripts/setlocalversion" \
+            "$ROOT/external/dtc/scripts/setlocalversion"; do
+            [ -f "$f" ] || continue
+            sed -i 's/${scm_version}//' "$f" || true
+            if grep -q 'echo "\$res"' "$f"; then
+              sed -i "\$s|echo \"\\\$res\"|echo \"-$SUFFIX\"|" "$f" || true
+              echo "  已改写 setlocalversion: $f"
+            fi
+          done
+          # 2) gki_defconfig 兜底: 固定 CONFIG_LOCALVERSION 并关闭 AUTO
+          DEFCONFIG="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
+          if [ -f "$DEFCONFIG" ]; then
+            if grep -q '^CONFIG_LOCALVERSION=' "$DEFCONFIG"; then
+              sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"-$SUFFIX\"|" "$DEFCONFIG" || true
+            else
+              echo "CONFIG_LOCALVERSION=\"-$SUFFIX\"" >> "$DEFCONFIG"
+            fi
+            if grep -q '^CONFIG_LOCALVERSION_AUTO=' "$DEFCONFIG"; then
+              sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*/CONFIG_LOCALVERSION_AUTO=n/' "$DEFCONFIG" || true
+            else
+              echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
+            fi
+            # OnePlus/OPPO 树里 -4k 属固定后缀, 一并替换(与 cctv18 一致)
+            sed -i "s/-4k/-$SUFFIX/g" "$DEFCONFIG" || true
+          fi
+          echo "EFFECTIVE_KERNEL_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
+          echo "内核版本后缀已设置: -$SUFFIX"
+
       - name: 设置自定义构建时间
         if: ${{ inputs.build_time != '' }}
         shell: bash
@@ -1594,11 +1656,15 @@ jobs:
           if [ -n "${ABK_VERSION:-}" ]; then
             version_label="_$(printf '%s' "$ABK_VERSION" | sed 's#[^A-Za-z0-9._-]#_#g')"
           fi
-          artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}_AnyKernel3"
+          suffix_label=""
+          if [ -n "${EFFECTIVE_KERNEL_SUFFIX:-}" ]; then
+            suffix_label="_$(printf '%s' "$EFFECTIVE_KERNEL_SUFFIX" | sed 's#[^A-Za-z0-9._-]#_#g')"
+          fi
+          artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}${suffix_label}_AnyKernel3"
           if [ "$EFFECTIVE_ENABLE_SUSFS" = "true" ]; then
             artifact_name="${artifact_name}_with-SUSFS"
           fi
-          image_artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}_raw-image-debug"
+          image_artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}${suffix_label}_raw-image-debug"
           cd AnyKernel3
           zip -q -r9 "../${artifact_name}.zip" ./*
           cd "$WORKSPACE"
