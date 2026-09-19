@@ -1190,6 +1190,48 @@ jobs:
           esac
           ccache -s
 
+      - name: 构建自定义外部模块
+        if: ${{ inputs.custom_external_modules != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE="$GITHUB_WORKSPACE/oneplus_workspace"
+          KERNEL_ROOT="$WORKSPACE/kernel_workspace/kernel_platform"
+          COMMON_ROOT="$KERNEL_ROOT/common"
+          OUT_DIR="$COMMON_ROOT/out"
+          MODULES_DIR="$WORKSPACE/custom_external_modules"
+          mkdir -p "$MODULES_DIR"
+          cd "$MODULES_DIR"
+          IFS='|' read -ra ENTRIES <<< "$CUSTOM_EXTERNAL_MODULES"
+          for entry in "${ENTRIES[@]}"; do
+            entry="$(echo "$entry" | tr -d '\r' | xargs)"
+            [ -z "$entry" ] && continue
+            repo_url="$entry"; stage=""
+            case "$entry" in
+              *:*) prefix="${entry%%:*}"; rest="${entry#*:}"; repo_url="${rest%%;*}"; stage="${rest#*;}"; [ "$stage" = "$rest" ] && stage="";;
+              *\;*) repo_url="${entry%%;*}"; stage="${entry#*}";;
+            esac
+            [ "$stage" = "$repo_url" ] && stage=""
+            name="$(basename "$repo_url" .git)"
+            echo "::group::构建外部模块: $name (stage=${stage:-默认})"
+            if ! git clone "$repo_url" "$name" --depth=1 ${stage:+--branch "$stage"}; then
+              echo "::warning::克隆 $repo_url 失败, 跳过。"
+              echo "::endgroup::"; continue
+            fi
+            (
+              cd "$name"
+              if [ -f Makefile ]; then
+                make -j"$(nproc --all)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" \
+                  LD=ld.lld -C "$COMMON_ROOT" O="$OUT_DIR" M="$PWD" modules 2>&1 | tail -n 20 \
+                  || echo "::warning::$name 模块构建失败, 跳过。"
+              else
+                echo "::warning::$name 无 Makefile, 无法自动构建。"
+              fi
+            )
+            echo "::endgroup::"
+          done
+          echo "CUSTOM_MODULES_DIR=$MODULES_DIR" >> "$GITHUB_ENV"
+
       - name: 打包 AnyKernel3
         shell: bash
         run: |
