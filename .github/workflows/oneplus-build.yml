@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: false
+      cancel_susfs:
+        description: "禁用 SUSFS (对齐 GKI 的 cancel_susfs; 勾选=关闭 SUSFS)"
+        required: false
+        type: boolean
+        default: false
       use_kpm:
         required: false
         type: boolean
@@ -96,11 +101,21 @@ on:
         required: false
         type: string
         default: "off"
-      zram_mode:
-        description: "ZRAM 模式: off | enhanced | full | custom:lzo,lz4,zstd (合并原 use_zram/zram_full_algo/zram_extra_algos, 以适配 workflow_dispatch 25 个输入上限)"
+      use_zram:
+        description: "启用 ZRAM 增强算法"
+        required: false
+        type: boolean
+        default: false
+      zram_full_algo:
+        description: "启用 ZRAM 完整算法支持 (6.12 自动跳过 legacy LZ4K/LZ4KD/LZ4K_OPLUS)"
+        required: false
+        type: boolean
+        default: false
+      zram_extra_algos:
+        description: "自定义 ZRAM 算法 (逗号分隔, 如 lzo,lz4,deflate,zstd,lz4kd)"
         required: false
         type: string
-        default: "off"
+        default: ""
       use_ddk:
         description: "启用 DDK 防格机 LSM"
         required: false
@@ -122,7 +137,7 @@ on:
         type: boolean
         default: false
       supp_op:
-        description: "启用一加 8E 支持 (OnePlus 树暂不支持, 仅记录)"
+        description: "启用一加 8E 支持 (OnePlus 树通常已内置, 未找到补丁时跳过并警告)"
         required: false
         type: boolean
         default: false
@@ -155,6 +170,7 @@ jobs:
       KERNEL_VERSION: ${{ inputs.kernel_version }}
       KSU_VARIANT: ${{ inputs.ksu_variant }}
       ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+      CANCEL_SUSFS: ${{ inputs.cancel_susfs }}
       USE_KPM: ${{ inputs.use_kpm }}
       USE_LZ4KD: ${{ inputs.use_lz4kd }}
       USE_BBG: ${{ inputs.use_bbg }}
@@ -170,7 +186,9 @@ jobs:
       ABK_VERSION: ${{ inputs.version }}
       BUILD_TIME: ${{ inputs.build_time }}
       VIRTUALIZATION_SUPPORT: ${{ inputs.virtualization_support }}
-      ZRAM_MODE: ${{ inputs.zram_mode }}
+      USE_ZRAM: ${{ inputs.use_zram }}
+      ZRAM_FULL_ALGO: ${{ inputs.zram_full_algo }}
+      ZRAM_EXTRA_ALGOS: ${{ inputs.zram_extra_algos }}
       USE_DDK: ${{ inputs.use_ddk }}
       USE_NTSYNC: ${{ inputs.use_ntsync }}
       USE_NETWORKING: ${{ inputs.use_networking }}
@@ -192,6 +210,16 @@ jobs:
 
           effective_kpm="$USE_KPM"
           effective_lz4kd="$USE_LZ4KD"
+          # zram_extra_algos 中指定 lz4kd / lz4k_oplus 时, 自动启用 lz4kd 补丁链路 (对齐 GKI)
+          if [ -n "${ZRAM_EXTRA_ALGOS:-}" ]; then
+            case "$(printf '%s' "$ZRAM_EXTRA_ALGOS" | tr '[:upper:]' '[:lower:]')" in
+              *lz4kd*|*lz4k_oplus*) effective_lz4kd="true" ;;
+            esac
+          fi
+          if [ "$CANCEL_SUSFS" = "true" ]; then
+            echo "已勾选禁用 SUSFS (cancel_susfs=true), 本次构建关闭 SUSFS。"
+            ENABLE_SUSFS="false"
+          fi
           if [ "$KSU_VARIANT" != "SukiSU" ] && [ "$KSU_VARIANT" != "ReSukiSU" ]; then
             effective_kpm="false"
           fi
@@ -284,8 +312,10 @@ jobs:
           echo "KSU 自定义引用: ${CUSTOM_REF:-默认}"
           echo "构建时间      : ${BUILD_TIME:-OnePlus upstream}"
           echo "自定义版本    : ${ABK_VERSION:-默认}"
-          echo "SUSFS 状态    : $ENABLE_SUSFS"
-          echo "ZRAM 模式     : ${ZRAM_MODE:-off} (lz4kd=$effective_lz4kd)"
+          echo "SUSFS 状态    : $ENABLE_SUSFS (禁用SUSFS=$CANCEL_SUSFS)"
+          echo "ZRAM 增强     : $USE_ZRAM (lz4kd=$effective_lz4kd)"
+          echo "ZRAM 完整算法 : $ZRAM_FULL_ALGO"
+          echo "ZRAM 额外算法 : ${ZRAM_EXTRA_ALGOS:-无}"
           echo "BBG 补丁      : $USE_BBG"
           echo "DDK LSM       : $USE_DDK"
           echo "NTsync 补丁   : $USE_NTSYNC"
@@ -322,8 +352,8 @@ jobs:
             echo "::error::Official / None 变体不支持 KPM，请关闭 KPM 后重试。"
             exit 1
           fi
-          if [ "$USE_LZ4KD" = "true" ] && [ "$KERNEL_VERSION" != "5.10" ] && [ "$KERNEL_VERSION" != "5.15" ] && [ "$KERNEL_VERSION" != "6.1" ] && [ "$KERNEL_VERSION" != "6.6" ]; then
-            echo "::warning::当前 OnePlus 内核版本不在 lz4kd 支持矩阵内，已关闭 lz4kd。"
+          if [ "${EFFECTIVE_USE_LZ4KD:-$USE_LZ4KD}" = "true" ] && [ "$KERNEL_VERSION" != "5.10" ] && [ "$KERNEL_VERSION" != "5.15" ] && [ "$KERNEL_VERSION" != "6.1" ] && [ "$KERNEL_VERSION" != "6.6" ]; then
+            echo "::warning::当前 OnePlus 内核版本不在 lz4kd 支持矩阵内(5.10/5.15/6.1/6.6)，lz4kd 相关配置可能被内核忽略。"
           fi
 
       - name: 检查 OnePlus 不支持的选项
@@ -334,7 +364,7 @@ jobs:
             echo "::warning::OnePlus 内核树当前不包含 GKI 虚拟化支持补丁 (virtualization_support), 该选项将被忽略。"
           fi
           if [ "$SUPP_OP" = "true" ]; then
-            echo "::warning::OnePlus 内核树当前不包含一加 8E 支持补丁 (supp_op), 该选项将被忽略。"
+            echo "::warning::OnePlus 内核树通常已内置一加 8E 支持, 未找到独立补丁 (supp_op) 时该选项不额外生效。"
           fi
 
       - name: 最大化构建空间
@@ -1267,20 +1297,9 @@ jobs:
             fi
           }
 
-          # ---- ZRAM 增强 (zram_mode: off | enhanced | full | custom:<algos>) ----
-          ZRAM_MODE_VALUE="$(printf '%s' "${ZRAM_MODE:-off}" | tr -d ' \r')"
-          ZRAM_MODE_KIND="${ZRAM_MODE_VALUE%%:*}"
-          ZRAM_MODE_ALGOS=""
-          case "$ZRAM_MODE_VALUE" in
-            *:*) ZRAM_MODE_ALGOS="${ZRAM_MODE_VALUE#*:}" ;;
-          esac
-          case "$ZRAM_MODE_KIND" in
-            ""|off|none|false) ZRAM_MODE_KIND="off" ;;
-            enhanced|full|custom) ;;
-            *) echo "::warning::未知 ZRAM 模式: $ZRAM_MODE_VALUE, 已按 off 处理。"; ZRAM_MODE_KIND="off" ;;
-          esac
-          if [ "$ZRAM_MODE_KIND" != "off" ]; then
-            echo "::group::ZRAM 增强 (mode=$ZRAM_MODE_VALUE)"
+          # ---- ZRAM 增强 (use_zram / zram_full_algo / zram_extra_algos, 对齐 GKI) ----
+          if [ "$USE_ZRAM" = "true" ] || [ "$ZRAM_FULL_ALGO" = "true" ] || [ -n "${ZRAM_EXTRA_ALGOS:-}" ]; then
+            echo "::group::ZRAM 增强 (zram=$USE_ZRAM full=$ZRAM_FULL_ALGO extra=${ZRAM_EXTRA_ALGOS:-无})"
             add_cfg CONFIG_ZSMALLOC y
             add_cfg CONFIG_ZRAM y
             if [ "$KERNEL_VERSION" != "6.12" ] && [ -f "$GITHUB_WORKSPACE/config/zram.config" ]; then
@@ -1291,7 +1310,7 @@ jobs:
                 esac
               done < "$GITHUB_WORKSPACE/config/zram.config"
             fi
-            if [ "$ZRAM_MODE_KIND" = "full" ]; then
+            if [ "$ZRAM_FULL_ALGO" = "true" ]; then
               if [ "$KERNEL_VERSION" = "6.12" ]; then
                 for s in CONFIG_ZRAM_BACKEND_LZO CONFIG_ZRAM_BACKEND_LZ4 CONFIG_ZRAM_BACKEND_LZ4HC CONFIG_ZRAM_BACKEND_ZSTD CONFIG_ZRAM_BACKEND_DEFLATE CONFIG_ZRAM_BACKEND_842; do
                   add_cfg "$s" y
@@ -1301,8 +1320,8 @@ jobs:
                   add_cfg "$s" y
                 done
               fi
-            elif [ "$ZRAM_MODE_KIND" = "custom" ] && [ -n "$ZRAM_MODE_ALGOS" ]; then
-              IFS=',' read -ra ZRAM_ALGOS <<< "$ZRAM_MODE_ALGOS"
+            elif [ -n "${ZRAM_EXTRA_ALGOS:-}" ]; then
+              IFS=',' read -ra ZRAM_ALGOS <<< "$ZRAM_EXTRA_ALGOS"
               for raw_algo in "${ZRAM_ALGOS[@]}"; do
                 z_algo="$(echo "$raw_algo" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
                 case "$z_algo" in
