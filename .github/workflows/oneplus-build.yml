@@ -55,6 +55,102 @@ on:
         required: false
         type: boolean
         default: false
+      # ===== 以下选项对齐 kernel-custom.yml (GKI 构建可用选项) =====
+      sub_level:
+        description: "子版本号 (如 66, 198, X)"
+        required: false
+        type: string
+        default: "66"
+      os_patch_level:
+        description: "安全补丁级别 (如 2022-01, lts)"
+        required: false
+        type: string
+        default: "2022-01"
+      revision:
+        description: "修订版本 (如 r11, 仅部分内核需要)"
+        required: false
+        type: string
+        default: ""
+      kernelsu_branch:
+        description: "KSU 分支 (Stable(标准)/Dev(开发)/Latest(最新)/Custom(自定义))"
+        required: false
+        type: string
+        default: "Stable(标准)"
+      custom_ref:
+        description: "自定义引用 (仅在 KSU 分支为 Custom(自定义) 时使用)"
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "自定义版本名 (可选)"
+        required: false
+        type: string
+        default: ""
+      build_time:
+        description: "自定义构建时间 (可选, N 或留空=当前 UTC)"
+        required: false
+        type: string
+        default: ""
+      virtualization_support:
+        description: "虚拟化支持 (OnePlus 树暂不支持, 仅记录, 不会生效)"
+        required: false
+        type: string
+        default: "off"
+      use_zram:
+        description: "启用 ZRAM 增强算法"
+        required: false
+        type: boolean
+        default: false
+      use_ddk:
+        description: "启用 DDK 防格机 LSM"
+        required: false
+        type: boolean
+        default: false
+      use_ntsync:
+        description: "启用 NTsync"
+        required: false
+        type: boolean
+        default: false
+      use_networking:
+        description: "启用网络增强 (IPSet + BBR)"
+        required: false
+        type: boolean
+        default: false
+      use_rekernel:
+        description: "启用 Re-Kernel 驱动"
+        required: false
+        type: boolean
+        default: false
+      supp_op:
+        description: "启用一加 8E 支持 (OnePlus 树暂不支持, 仅记录)"
+        required: false
+        type: boolean
+        default: false
+      zram_full_algo:
+        description: "启用 ZRAM 完整算法支持"
+        required: false
+        type: boolean
+        default: false
+      zram_extra_algos:
+        description: "自定义 ZRAM 算法 (逗号分隔, 如 lzo,lz4,deflate,zstd)"
+        required: false
+        type: string
+        default: ""
+      kpm_password:
+        description: "自定义 KPM 超级密码 (留空=使用默认密码)"
+        required: false
+        type: string
+        default: ""
+      custom_external_modules:
+        description: "自定义外部模块 (repo;stage 或 module:repo;stage, 用 | 分隔)"
+        required: false
+        type: string
+        default: ""
+      custom_kernel_options:
+        description: "自定义内核选项 (每行一条 Kconfig/defconfig 片段)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -192,24 +288,29 @@ jobs:
           echo "上游 XML      : $DEVICE_MANIFEST"
           echo "Android 版本  : $ANDROID_VERSION"
           echo "内核版本      : $KERNEL_VERSION"
-          echo "子版本号      : OnePlus manifest"
-          echo "补丁级别      : OnePlus manifest"
+          echo "子版本号      : ${SUB_LEVEL:-OnePlus manifest}"
+          echo "补丁级别      : ${OS_PATCH_LEVEL:-OnePlus manifest}"
+          echo "修订版本      : ${REVISION:-OnePlus manifest}"
           echo "KSU 变体      : $KSU_VARIANT"
-          echo "KSU 分支      : OnePlus upstream"
-          echo "构建时间      : OnePlus upstream"
+          echo "KSU 分支      : ${KSU_BRANCH:-OnePlus upstream}"
+          echo "KSU 自定义引用: ${CUSTOM_REF:-默认}"
+          echo "构建时间      : ${BUILD_TIME:-OnePlus upstream}"
+          echo "自定义版本    : ${ABK_VERSION:-默认}"
           echo "SUSFS 状态    : $ENABLE_SUSFS"
-          echo "ZRAM 增强     : $effective_lz4kd"
-          echo "ZRAM 完整算法 : false"
-          echo "ZRAM 额外算法 : lz4kd=$effective_lz4kd"
+          echo "ZRAM 增强     : $USE_ZRAM (lz4kd=$effective_lz4kd)"
+          echo "ZRAM 完整算法 : $ZRAM_FULL_ALGO"
+          echo "ZRAM 额外算法 : ${ZRAM_EXTRA_ALGOS:-lz4kd=$effective_lz4kd}"
           echo "BBG 补丁      : $USE_BBG"
-          echo "DDK LSM       : false"
-          echo "NTsync 补丁   : false"
-          echo "Networking 增强: BBR=$USE_BBR, proxy=$effective_proxy"
+          echo "DDK LSM       : $USE_DDK"
+          echo "NTsync 补丁   : $USE_NTSYNC"
+          echo "Networking 增强: networking=$USE_NETWORKING, BBR=$USE_BBR, proxy=$effective_proxy"
           echo "KPM 功能      : $effective_kpm"
-          echo "KPM 密码      : 默认"
-          echo "Re-Kernel     : false"
-          echo "虚拟化支持   : off"
-          echo "自定义注入    : 无"
+          echo "KPM 密码      : $([ -n "$KPM_PASSWORD" ] && echo '已自定义' || echo '默认')"
+          echo "Re-Kernel     : $USE_REKERNEL"
+          echo "虚拟化支持   : $VIRTUALIZATION_SUPPORT (OnePlus 树不支持, 忽略)"
+          echo "一加 8E 支持  : $SUPP_OP (OnePlus 树不支持, 忽略)"
+          echo "自定义内核选项: $([ -n "$CUSTOM_KERNEL_OPTIONS" ] && echo '有' || echo '无')"
+          echo "外部模块      : $([ -n "$CUSTOM_EXTERNAL_MODULES" ] && echo '有' || echo '无')"
           echo "Stock Config  : OnePlus manifest"
           echo "Unicode 绕过  : $USE_UNICODE_BYPASS"
           echo "风驰调度器    : $USE_FENGCHI"
@@ -295,7 +396,7 @@ jobs:
           apt_update_retry
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
             python3 git curl ccache libelf-dev libdw-dev build-essential flex bison libssl-dev \
-            libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk \
+            libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk jq \
             dos2unix zip gcc-aarch64-linux-gnu
           if ! command -v repo >/dev/null 2>&1; then
             curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o repo
@@ -358,6 +459,29 @@ jobs:
           }
           repo_sync_retry
 
+      - name: 确定 KernelSU 分支（对齐 kernel-custom.yml）
+        if: ${{ inputs.ksu_variant != 'None' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          KSU_VARIANT: ${{ inputs.ksu_variant }}
+          KSU_BRANCH: ${{ inputs.kernelsu_branch }}
+          CUSTOM_REF: ${{ inputs.custom_ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          echo "KSU 分支选择: ${KSU_BRANCH:-Stable(标准)}"
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/resolve-ksu-ref.sh" ]; then
+            if bash "$GITHUB_WORKSPACE/.github/scripts/resolve-ksu-ref.sh"; then
+              echo "已解析 KSU ref: ${BRANCH:-<空>} (repo=${RESOLVED_KSU_REPO:-未知})"
+            else
+              echo "::warning::KSU ref 解析失败, 将回退到各变体默认分支。"
+            fi
+          else
+            echo "::warning::未找到 resolve-ksu-ref.sh, 将回退到各变体默认分支。"
+          fi
+
       - name: 准备 KernelSU 和补丁
         shell: bash
         run: |
@@ -378,19 +502,40 @@ jobs:
 
           if [ "$KSU_VARIANT" != "None" ]; then
             cd "$KERNEL_ROOT"
+            RESOLVED_KSU_REF="${BRANCH:-}"
+            KSU_BRANCH_SELECTED="${KSU_BRANCH:-Stable(标准)}"
             case "$KSU_VARIANT" in
               Official)
-                curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+                ref="${RESOLVED_KSU_REF:-main}"
+                echo "KernelSU 官方版 ref: $ref"
+                curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s "$ref"
                 ;;
               SukiSU)
-                curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
+                if [ "$KSU_BRANCH_SELECTED" = "Stable(标准)" ] || [ -z "$RESOLVED_KSU_REF" ]; then
+                  # OnePlus 内核树使用 SukiSU builtin 分支
+                  curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
+                else
+                  ref="$RESOLVED_KSU_REF"
+                  echo "SukiSU ref: $ref"
+                  setup_script="$(mktemp)"
+                  curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" -o "$setup_script"
+                  if grep -qF 'git checkout "$1" && echo "[-] Checked out $1." || echo "[-] Checkout default branch"' "$setup_script"; then
+                    sed -i '/git checkout "\$1" && echo /c\        git checkout "$1" && echo "[-] Checked out $1."' "$setup_script"
+                  fi
+                  bash "$setup_script" "$ref"
+                  rm -f "$setup_script"
+                fi
                 ;;
               ReSukiSU)
-                curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+                ref="${RESOLVED_KSU_REF:-main}"
+                echo "ReSukiSU ref: $ref"
+                curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s "$ref"
                 ;;
               KernelSU-Next)
                 # KernelSU-Next (pershoot) dev-susfs 分支, 内置 SUSFS 支持
-                curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+                ksun_ref="${RESOLVED_KSU_REF:-dev-susfs}"
+                echo "KernelSU-Next ref: $ksun_ref"
+                curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s "$ksun_ref"
                 # 为 KernelSU Next 添加 WildKSU / pershoot Manager 签名支持 (apk_sign.patch)
                 curl -fsSL "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/main/other_patch/apk_sign.patch" -o "$KERNEL_ROOT/apk_sign.patch"
                 cd "$COMMON_ROOT/drivers/kernelsu"
@@ -1115,6 +1260,179 @@ jobs:
           fi
           sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
 
+      - name: 应用扩展功能（对齐 kernel-custom.yml）
+        shell: bash
+        run: |
+          set -uo pipefail
+          WORKSPACE="$GITHUB_WORKSPACE/oneplus_workspace"
+          KERNEL_ROOT="$WORKSPACE/kernel_workspace/kernel_platform"
+          COMMON_ROOT="$KERNEL_ROOT/common"
+          DEFCONFIG_PATH="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
+          test -f "$DEFCONFIG_PATH"
+
+          add_cfg() {
+            local sym="$1" val="${2:-y}"
+            if [ "$val" = "n" ]; then
+              sed -i "/^${sym}=/d" "$DEFCONFIG_PATH" 2>/dev/null || true
+              grep -q "^# ${sym} is not set" "$DEFCONFIG_PATH" || echo "# ${sym} is not set" >> "$DEFCONFIG_PATH"
+            else
+              sed -i "/^${sym}=/d; /^# ${sym} is not set/d" "$DEFCONFIG_PATH" 2>/dev/null || true
+              echo "${sym}=${val}" >> "$DEFCONFIG_PATH"
+            fi
+          }
+
+          # ---- ZRAM 增强 (use_zram / zram_full_algo / zram_extra_algos) ----
+          if [ "$USE_ZRAM" = "true" ] || [ "$ZRAM_FULL_ALGO" = "true" ] || [ -n "$ZRAM_EXTRA_ALGOS" ]; then
+            echo "::group::ZRAM 增强"
+            add_cfg CONFIG_ZSMALLOC y
+            add_cfg CONFIG_ZRAM y
+            if [ "$KERNEL_VERSION" != "6.12" ] && [ -f "$GITHUB_WORKSPACE/config/zram.config" ]; then
+              while IFS= read -r line; do
+                case "$line" in
+                  ''|'#'*) continue ;;
+                  CONFIG_*=*) add_cfg "${line%%=*}" "${line#*=}" ;;
+                esac
+              done < "$GITHUB_WORKSPACE/config/zram.config"
+            fi
+            if [ "$ZRAM_FULL_ALGO" = "true" ]; then
+              if [ "$KERNEL_VERSION" = "6.12" ]; then
+                for s in CONFIG_ZRAM_BACKEND_LZO CONFIG_ZRAM_BACKEND_LZ4 CONFIG_ZRAM_BACKEND_LZ4HC CONFIG_ZRAM_BACKEND_ZSTD CONFIG_ZRAM_BACKEND_DEFLATE CONFIG_ZRAM_BACKEND_842; do
+                  add_cfg "$s" y
+                done
+              else
+                for s in CONFIG_CRYPTO_LZO CONFIG_CRYPTO_LZ4 CONFIG_CRYPTO_DEFLATE CONFIG_CRYPTO_ZSTD; do
+                  add_cfg "$s" y
+                done
+              fi
+            elif [ -n "$ZRAM_EXTRA_ALGOS" ]; then
+              IFS=',' read -ra ZRAM_ALGOS <<< "$ZRAM_EXTRA_ALGOS"
+              for raw_algo in "${ZRAM_ALGOS[@]}"; do
+                z_algo="$(echo "$raw_algo" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+                case "$z_algo" in
+                  "") continue ;;
+                  lzo) add_cfg CONFIG_CRYPTO_LZO y ;;
+                  lz4) add_cfg CONFIG_CRYPTO_LZ4 y ;;
+                  lz4hc) add_cfg CONFIG_CRYPTO_LZ4HC y ;;
+                  lz4k) add_cfg CONFIG_CRYPTO_LZ4K y ;;
+                  lz4k_oplus) add_cfg CONFIG_CRYPTO_LZ4K_OPLUS y ;;
+                  lz4kd) add_cfg CONFIG_CRYPTO_LZ4KD y ;;
+                  deflate) add_cfg CONFIG_CRYPTO_DEFLATE y ;;
+                  842) add_cfg CONFIG_CRYPTO_842 y ;;
+                  zstd) add_cfg CONFIG_CRYPTO_ZSTD y ;;
+                  zstdp) add_cfg CONFIG_XXHASH y; add_cfg CONFIG_CRYPTO_ZSTDP y ;;
+                  *) echo "::warning::未知 ZRAM 算法: $z_algo, 跳过。" ;;
+                esac
+              done
+            fi
+            echo "::endgroup::"
+          fi
+
+          # ---- 网络增强 (use_networking: IPSet + BBR) ----
+          if [ "$USE_NETWORKING" = "true" ]; then
+            echo "::group::Networking 增强"
+            cat >> "$DEFCONFIG_PATH" <<'EOF'
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_TCP_CONG_BIC=n
+          CONFIG_TCP_CONG_WESTWOOD=n
+          CONFIG_TCP_CONG_HTCP=n
+          CONFIG_BPF_STREAM_PARSER=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          EOF
+            echo "::endgroup::"
+          fi
+
+          # ---- DDK 防格机 LSM (use_ddk) ----
+          if [ "$USE_DDK" = "true" ]; then
+            echo "::group::DDK LSM"
+            if [ -f "$GITHUB_WORKSPACE/ddk/setup.sh" ]; then
+              ( cd "$KERNEL_ROOT" && bash "$GITHUB_WORKSPACE/ddk/setup.sh" ) || echo "::warning::DDK setup 失败, 跳过。"
+            else
+              echo "::warning::未找到 ddk/setup.sh, 跳过 DDK。"
+            fi
+            if [ -f "$COMMON_ROOT/include/linux/xingguang_ddk.h" ]; then
+              add_cfg CONFIG_XINGGUANG_DDK y
+            else
+              echo "::warning::DDK 源码未就绪, 未启用 CONFIG_XINGGUANG_DDK。"
+            fi
+            echo "::endgroup::"
+          fi
+
+          # ---- Re-Kernel 驱动 (use_rekernel) ----
+          if [ "$USE_REKERNEL" = "true" ]; then
+            echo "::group::Re-Kernel"
+            TMP_REKERNEL="$(mktemp -d)/rekernel"
+            if git clone --depth 1 https://github.com/Sakion-Team/Re-Kernel.git "$TMP_REKERNEL"; then
+              REKERNEL_SRC="$TMP_REKERNEL/LKM-Source"
+              if [ -d "$REKERNEL_SRC" ]; then
+                RK="$COMMON_ROOT/drivers/rekernel"
+                rm -rf "$RK"
+                mkdir -p "$RK"
+                cp "$REKERNEL_SRC"/*.c "$RK/" 2>/dev/null || true
+                cp "$REKERNEL_SRC"/*.h "$RK/" 2>/dev/null || true
+                cp "$REKERNEL_SRC/Makefile" "$RK/" 2>/dev/null || true
+                cp "$REKERNEL_SRC/Kconfig" "$RK/" 2>/dev/null || true
+                sed -i 's/^obj-m[[:space:]]*:=/obj-$(CONFIG_REKERNEL) +=/' "$RK/Makefile" 2>/dev/null || true
+                sed -i '/depends on MODULES/d' "$RK/Kconfig" 2>/dev/null || true
+                sed -i '0,/bool "Re:Kernel module"/s//bool "Re:Kernel support (GKI Vendor Hooks)"/' "$RK/Kconfig" 2>/dev/null || true
+                sed -i '0,/default n/s//\tdefault y/' "$RK/Kconfig" 2>/dev/null || true
+                grep -qF 'source "drivers/rekernel/Kconfig"' "$COMMON_ROOT/drivers/Kconfig" || \
+                  sed -i '/^endmenu$/i source "drivers/rekernel/Kconfig"' "$COMMON_ROOT/drivers/Kconfig"
+                grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$COMMON_ROOT/drivers/Makefile" || \
+                  echo 'obj-$(CONFIG_REKERNEL) += rekernel/' >> "$COMMON_ROOT/drivers/Makefile"
+                if [ -f "$RK/rekernel_binder.c" ]; then
+                  sed -i 's|#include <../android/binder_internal.h>|#include "../../drivers/android/binder_internal.h"|g' "$RK/rekernel_binder.c" 2>/dev/null || true
+                  grep -qF '#include <linux/seq_file.h>' "$RK/rekernel_binder.c" || \
+                    sed -i '/#include <trace\/hooks\/binder.h>/a #include <linux/seq_file.h>' "$RK/rekernel_binder.c"
+                fi
+                add_cfg CONFIG_REKERNEL y
+                add_cfg CONFIG_REKERNEL_NETWORK y
+              else
+                echo "::warning::Re-Kernel 上游缺少 LKM-Source 目录, 跳过。"
+              fi
+            else
+              echo "::warning::克隆 Re-Kernel 失败, 跳过。"
+            fi
+            echo "::endgroup::"
+          fi
+
+          # ---- NTsync 补丁 (use_ntsync) ----
+          if [ "$USE_NTSYNC" = "true" ]; then
+            echo "::group::NTsync"
+            NTSYNC_REPO="$WORKSPACE/ntsync_patches"
+            rm -rf "$NTSYNC_REPO"
+            if git clone --depth 1 https://github.com/WildKernels/kernel_patches.git "$NTSYNC_REPO"; then
+              NTDIR="$NTSYNC_REPO/common/ntsync"
+              BASE_PATCH="$NTDIR/ntsync_base.patch"
+              COMPAT_PATCH="$NTDIR/ntsync_compat_${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+              NTSYNC_SOURCE="$COMMON_ROOT/drivers/misc/ntsync.c"
+              if [ -f "$NTSYNC_SOURCE" ] && [ -f "$COMMON_ROOT/include/uapi/linux/ntsync.h" ]; then
+                echo "内核树已自带原生 NTsync, 跳过基础补丁。"
+              elif [ -f "$BASE_PATCH" ]; then
+                ( cd "$COMMON_ROOT" && patch -p1 -N -F 3 < "$BASE_PATCH" ) || echo "::warning::NTsync 基础补丁应用不完整。"
+              else
+                echo "::warning::未找到 NTsync 基础补丁, 跳过。"
+              fi
+              if [ -f "$COMPAT_PATCH" ]; then
+                ( cd "$COMMON_ROOT" && patch -p1 -N -F 3 < "$COMPAT_PATCH" ) || echo "::warning::NTsync 兼容补丁应用不完整。"
+              fi
+              if [ -f "$NTSYNC_SOURCE" ] || [ -f "$COMMON_ROOT/include/uapi/linux/ntsync.h" ]; then
+                add_cfg CONFIG_NTSYNC y
+              else
+                echo "::warning::NTsync 源码未生成, 未启用 CONFIG_NTSYNC。"
+              fi
+            else
+              echo "::warning::克隆 NTsync 补丁仓库失败, 跳过。"
+            fi
+            echo "::endgroup::"
+          fi
+
       - name: 设置自定义构建时间
         if: ${{ inputs.build_time != '' }}
         shell: bash
@@ -1275,11 +1593,15 @@ jobs:
           else
             algo_label="base"
           fi
-          artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}_AnyKernel3"
+          version_label=""
+          if [ -n "${ABK_VERSION:-}" ]; then
+            version_label="_$(printf '%s' "$ABK_VERSION" | sed 's#[^A-Za-z0-9._-]#_#g')"
+          fi
+          artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}_AnyKernel3"
           if [ "$EFFECTIVE_ENABLE_SUSFS" = "true" ]; then
             artifact_name="${artifact_name}_with-SUSFS"
           fi
-          image_artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}_raw-image-debug"
+          image_artifact_name="${DEVICE_ARTIFACT_ID}_${variant_label}_${algo_label}${version_label}_raw-image-debug"
           cd AnyKernel3
           zip -q -r9 "../${artifact_name}.zip" ./*
           cd "$WORKSPACE"
