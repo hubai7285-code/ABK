@@ -187,6 +187,7 @@ import com.abk.kernel.utils.FlashFilterWorkflowState
 import com.abk.kernel.utils.FlashWorkflowFilter
 import com.abk.kernel.utils.WorkflowPrimary
 import com.abk.kernel.ui.components.AbkScreenHorizontalPadding
+import com.abk.kernel.ui.components.AbkInlineLoadingPill
 import com.abk.kernel.ui.components.ObserveChildPageVisibility
 import com.abk.kernel.ui.components.childPageOverlayEnterTransition
 import com.abk.kernel.ui.components.childPageOverlayExitTransition
@@ -206,6 +207,8 @@ import com.abk.kernel.ui.components.ExpressiveEmptyState
 import com.abk.kernel.ui.components.ExpressiveHeroCard
 import com.abk.kernel.ui.components.ExpressiveSectionCard
 import com.abk.kernel.ui.components.ExpressiveStatusChip
+import com.abk.kernel.ui.blur.blurredCardBackground
+import com.abk.kernel.ui.blur.blurredCardSurfaceColor
 import com.abk.kernel.ui.components.ExpressiveTopBar
 import com.abk.kernel.ui.theme.uiSurfaceColor
 import com.abk.kernel.utils.DownloadUtils
@@ -281,10 +284,15 @@ internal fun PrebuiltReleaseCard(
     release: PrebuiltGkiRelease,
     onClick: () -> Unit
 ) {
+    val shape = MaterialTheme.shapes.medium
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        modifier = Modifier
+            .fillMaxWidth()
+            .blurredCardBackground(shape)
+            .clickable(onClick = onClick),
+        shape = shape,
         colors = CardDefaults.cardColors(
-            containerColor = uiSurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
+            containerColor = blurredCardSurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
         )
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -470,15 +478,11 @@ internal fun PrebuiltDropdownField(
 
 @Composable
 internal fun LoadingRow(text: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        LoadingIndicator(modifier = Modifier.size(24.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(text)
-    }
+    AbkInlineLoadingPill(
+        text = text,
+        modifier = Modifier.padding(vertical = 12.dp),
+        compact = false
+    )
 }
 
 @Composable
@@ -500,10 +504,14 @@ internal fun PrebuiltGkiAssetCard(
         animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
         label = "prebuilt-gki-download"
     )
+    val shape = MaterialTheme.shapes.medium
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .blurredCardBackground(shape),
+        shape = shape,
         colors = CardDefaults.cardColors(
-            containerColor = uiSurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
+            containerColor = blurredCardSurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
         )
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -409,6 +409,32 @@ object CustomExternalModuleStage {
     }
 }
 
+object CustomKernelOptionMode {
+    const val ENABLED_Y = "enabled_y"
+    const val ENABLED_M = "enabled_m"
+    const val DISABLED = "disabled"
+    const val IGNORE = "ignore"
+    const val RAW = "raw"
+
+    val options = listOf(ENABLED_Y, ENABLED_M, DISABLED, IGNORE, RAW)
+
+    fun normalize(value: String?): String = when (value?.trim()?.lowercase()) {
+        ENABLED_Y, "y", "yes", "on", "enable", "enabled" -> ENABLED_Y
+        ENABLED_M, "m", "module", "mod" -> ENABLED_M
+        DISABLED, "n", "no", "off", "disable", "disabled", "not_set", "not-set" -> DISABLED
+        IGNORE, "skip", "unchanged", "keep" -> IGNORE
+        RAW, "value", "raw_value", "raw-value" -> RAW
+        else -> IGNORE
+    }
+}
+
+data class CustomKernelOption(
+    val symbol: String = "",
+    val mode: String = CustomKernelOptionMode.IGNORE,
+    val rawValue: String = "",
+    val source: String = ""
+)
+
 data class CustomExternalModule(
     val url: String = "",
     val stage: String = CustomExternalModuleStage.AFTER_PATCH,
@@ -504,6 +530,20 @@ data class RuntimeModuleCatalogItem(
     val maxApi: Int? = null
 )
 
+internal fun runtimeModuleDownloadFileName(id: String, name: String): String {
+    val base = id.ifBlank { name }
+        .replace(Regex("""[^A-Za-z0-9._-]"""), "_")
+        .trim('_')
+        .ifBlank { "module" }
+    return if (base.endsWith(".zip", ignoreCase = true)) base else "${base}-module.zip"
+}
+
+internal fun RuntimeModuleCatalogItem.downloadFileName(): String =
+    runtimeModuleDownloadFileName(id, name)
+
+internal fun AbkRuntimeModule.downloadFileName(): String =
+    runtimeModuleDownloadFileName(id, name.ifBlank { "module" })
+
 data class ModuleCatalogRepository(
     val id: String = "",
     val url: String = "",
@@ -549,7 +589,10 @@ const val KSU_VARIANT_OFFICIAL = "Official"
 const val KSU_VARIANT_SUKISU = "SukiSU"
 const val KSU_VARIANT_RESUKISU = "ReSukiSU"
 const val BUILD_TARGET_GKI = "gki"
+const val BUILD_TARGET_CUSTOM_SOURCE = "custom_source"
 const val BUILD_TARGET_ONEPLUS = "oneplus"
+const val SOURCE_ACCESS_PUBLIC = "public"
+const val SOURCE_ACCESS_GITHUB_PRIVATE = "github_private"
 
 val KSU_BRANCH_STANDARD_OPTIONS = listOf(
     KSU_BRANCH_STABLE,
@@ -574,6 +617,11 @@ val ONEPLUS_KSU_VARIANT_OPTIONS = listOf(
 // App-level build config model (mirrors kernel-custom.yml inputs)
 data class KernelBuildConfig(
     val buildTarget: String = BUILD_TARGET_GKI,
+    val sourceUrl: String = "",
+    val sourceRef: String = "",
+    val sourceAccessMode: String = SOURCE_ACCESS_PUBLIC,
+    val sourceDefconfigs: List<String> = listOf("gki_defconfig"),
+    val sourceDeviceLabel: String = "",
     val androidVersion: String = "android12",
     val kernelVersion: String = "5.10",
     val subLevel: String = "66",
@@ -597,6 +645,7 @@ data class KernelBuildConfig(
     val zramExtraAlgos: String = "",
     val kpmPassword: String = "",
     val virtualizationSupport: String = "off",
+    val customKernelOptions: List<CustomKernelOption> = emptyList(),
     val useCustomExternalModules: Boolean = false,
     val customExternalModules: List<CustomExternalModule> = emptyList(),
     val onePlusCpu: String = "sm8650",
@@ -656,6 +705,7 @@ data class AbkRuntimeModule(
     val stage: String = "",
     @SerializedName("entry_kind") val entryKind: String = "",
     val source: String = "",
+    @SerializedName("update_json") val updateJson: String = "",
     @SerializedName("extension_id") val extensionId: String = "",
     @SerializedName("companion_package") val companionPackage: String = "",
     @SerializedName("companion_display_name") val companionDisplayName: String = "",
@@ -669,6 +719,7 @@ data class AbkRuntimeModule(
     val enabled: Boolean = true,
     val update: Boolean = false,
     val remove: Boolean = false,
+    val metamodule: Boolean = false,
     @SerializedName("has_web_ui") val hasWebUi: Boolean = false,
     @SerializedName("has_action_script") val hasActionScript: Boolean = false,
     @SerializedName("action_supported") val actionSupported: Boolean = false,
@@ -708,6 +759,15 @@ data class ManagerSettingItem(
     val status: ManagerSettingStatus = ManagerSettingStatus.SUPPORTED
 )
 
+data class KernelTcpCongestionControlState(
+    val currentAlgorithm: String = "",
+    val availableAlgorithms: List<String> = emptyList(),
+    val allowedAlgorithms: List<String> = emptyList()
+) {
+    val available: Boolean
+        get() = availableAlgorithms.isNotEmpty()
+}
+
 data class AppProfileTemplateItem(
     val id: String = "",
     val content: String = ""
@@ -723,6 +783,8 @@ data class RootGrantApp(
     val profileLoaded: Boolean = false
 )
 
+const val ROOT_PROFILE_FLAG_NO_NEW_PRIVS: Long = 1L
+
 data class RootGrantProfile(
     val name: String = "",
     val currentUid: Int = 0,
@@ -735,6 +797,7 @@ data class RootGrantProfile(
     val capabilities: List<Int> = emptyList(),
     val context: String = "u:r:ksu:s0",
     val namespace: Int = 0,
+    val flags: Long = ROOT_PROFILE_FLAG_NO_NEW_PRIVS,
     val nonRootUseDefault: Boolean = true,
     val umountModules: Boolean = true,
     val rules: String = ""
@@ -805,6 +868,10 @@ data class DownloadedArtifact(
     val sourceAssetName: String? = null,
     val verified: Boolean = false,
     val verificationSummary: String? = null,
+    val manifestPayloadKind: String? = null,
+    val manifestKernelSource: String? = null,
+    val manifestFeatureStatus: String? = null,
+    val manifestClientNotice: String? = null,
     val category: ArtifactCategory = type.toArtifactCategory()
 )
 
@@ -851,16 +918,11 @@ fun WorkflowRun.isFailedFlashRun(): Boolean =
  */
 fun WorkflowRun.isKernelBuild(): Boolean {
     val workflowName = name.orEmpty().lowercase()
-    val lower = "${name.orEmpty()} ${displayTitle.orEmpty()}".lowercase()
-    if (lower.hasUtilityWorkflowSignal()) return false
+    if (workflowName.hasUtilityWorkflowSignal()) return false
     // The workflow name is more reliable than displayTitle, which can contain
     // user/commit text from a different build type.
     if (workflowName.hasManagerBuildSignal()) return false
     if (workflowName.hasKernelBuildSignal()) return true
-    // Negative signals: app / manager / certificate / utility workflows.
-    if (lower.hasManagerBuildSignal()) return false
-    // Positive signals: kernel build.
-    if (lower.hasKernelBuildSignal()) return true
     // Unknown — be conservative and exclude it from the kernel-only tile.
     return false
 }
@@ -873,15 +935,12 @@ fun WorkflowRun.isKernelBuild(): Boolean {
  */
 fun WorkflowRun.isManagerBuild(): Boolean {
     val workflowName = name.orEmpty().lowercase()
-    val lower = "${name.orEmpty()} ${displayTitle.orEmpty()}".lowercase()
-    if (lower.hasUtilityWorkflowSignal()) return false
+    if (workflowName.hasUtilityWorkflowSignal()) return false
     // The GitHub run display title can contain kernel parameters from the
     // triggering commit/title. The workflow name is the primary classifier.
     if (workflowName.hasManagerBuildSignal()) return true
     if (workflowName.hasKernelBuildSignal()) return false
-    // Kernel workflows often bundle a manager APK but are not manager-primary.
-    if (lower.hasKernelBuildSignal()) return false
-    return lower.hasManagerBuildSignal()
+    return false
 }
 
 /** Manager-primary workflow (Build ABK App / Dev), not a kernel build that bundles a manager APK. */

@@ -16,6 +16,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import kotlin.io.path.createTempDirectory
 
 class DownloadAndProgressUtilsTest {
 
@@ -73,8 +76,7 @@ class DownloadAndProgressUtilsTest {
             runId = PREBUILT_GKI_RUN_ID,
             runTitle = "预编译 GKI",
             sourceAssetId = asset.id,
-            sourceAssetName = asset.name,
-            category = ArtifactType.KERNEL_IMG.toArtifactCategory()
+            sourceAssetName = asset.name
         )
 
         assertTrue(DownloadUtils.matchesDownloadedPrebuilt(downloaded, asset))
@@ -99,8 +101,7 @@ class DownloadAndProgressUtilsTest {
             type = ArtifactType.ANYKERNEL3,
             sizeBytes = 1L,
             runId = PREBUILT_GKI_RUN_ID,
-            runTitle = "预编译 GKI",
-            category = ArtifactType.ANYKERNEL3.toArtifactCategory()
+            runTitle = "预编译 GKI"
         )
 
         assertTrue(DownloadUtils.matchesDownloadedPrebuilt(downloaded, asset))
@@ -108,7 +109,7 @@ class DownloadAndProgressUtilsTest {
 
     @Test
     fun selectsExpectedApkForAppUpdateChannel() {
-        val root = createTempDir("app-update-select")
+        val root = createTempDirectory("app-update-select").toFile()
         val release = File(root, "app-release.apk").apply { writeText("release") }
         val debug = File(root, "app-debug.apk").apply { writeText("debug") }
         val devRelease = File(root, "app-release-dev.apk").apply { writeText("dev-release") }
@@ -128,7 +129,7 @@ class DownloadAndProgressUtilsTest {
 
     @Test
     fun collectArtifactPayloadFilesSkipsNoticeFilesEvenAsFallback() {
-        val root = createTempDir("download-utils-test").apply {
+        val root = createTempDirectory("download-utils-test").toFile().apply {
             deleteOnExit()
         }
         File(root, "LICENSE").writeText("license text")
@@ -138,6 +139,26 @@ class DownloadAndProgressUtilsTest {
         val candidates = DownloadUtils.collectArtifactPayloadFiles(root)
 
         assertEquals(listOf("KernelSU-Manager.apk"), candidates.map { it.name })
+    }
+
+    @Test
+    fun collectArtifactPayloadFilesKeepsImagesBundleAlongsideAnyKernelBundle() {
+        val root = createTempDirectory("custom-source-artifacts").toFile()
+        val images = File(root, "android14-6.1.174-Images.zip.bundle.zip")
+        ZipOutputStream(images.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry(ArtifactVerification.MANIFEST_FILE_NAME))
+            zip.write(
+                """{"schema":1,"bundle_name":"${images.name}","artifact_type":"OTHER","run_id":1,"payload_name":"images.zip","payload_sha256":"","payload_size_bytes":0,"payload_kind":"KERNEL_IMAGE_SET"}"""
+                    .toByteArray()
+            )
+            zip.closeEntry()
+        }
+        File(root, "android14-6.1.174-AnyKernel3.zip").writeText("anykernel")
+
+        val candidates = DownloadUtils.collectArtifactPayloadFiles(root).map { it.name }
+
+        assertTrue(images.name in candidates)
+        assertTrue(candidates.any { "AnyKernel3" in it })
     }
 
     @Test
@@ -153,6 +174,10 @@ class DownloadAndProgressUtilsTest {
         assertEquals(material.publicKeyPem, ForkSigningManager.publicKeyPemFromStoredValue(material.publicKeyBase64))
         assertEquals(material.publicKeyPem, ForkSigningManager.publicKeyPemFromStoredValue(material.publicKeyPem))
         assertEquals(material.publicKeyPem, ForkSigningManager.publicKeyPemFromStoredValue(jsonValue))
+        assertEquals(
+            material.publicKeyBase64,
+            ForkSigningManager.publicKeyBase64FromStoredValue(material.publicKeyPem)
+        )
     }
 
     @Test
@@ -161,6 +186,20 @@ class DownloadAndProgressUtilsTest {
         assertNull(ForkSigningManager.publicKeyPemFromStoredValue("""{"unexpected":true}"""))
         assertNull(ForkSigningManager.publicKeyPemFromStoredValue(""))
         assertNull(ForkSigningManager.publicKeyPemFromStoredValue(null))
+        assertNull(
+            ForkSigningManager.publicKeyPemFromStoredValue(
+                java.util.Base64.getEncoder().encodeToString("not a public key".toByteArray())
+            )
+        )
+        val ecPublicKey = java.security.KeyPairGenerator.getInstance("EC")
+            .generateKeyPair()
+            .public
+            .encoded
+        assertNull(
+            ForkSigningManager.publicKeyPemFromStoredValue(
+                java.util.Base64.getEncoder().encodeToString(ecPublicKey)
+            )
+        )
     }
 
     @Test

@@ -23,17 +23,28 @@ import com.abk.kernel.data.model.*
 import com.abk.kernel.data.repository.GitHubRepository
 import com.abk.kernel.data.repository.PreferencesRepository
 import com.abk.kernel.data.repository.Result
+import com.abk.kernel.ui.blur.BlurConfig
+import com.abk.kernel.utils.BackgroundImageStorage
 import com.abk.kernel.utils.BuildMonitorService
 import com.abk.kernel.utils.BuildProgressUtils
 import com.abk.kernel.utils.buildDisplaySnapshot
 import com.abk.kernel.utils.computeKindBuildProgress
 import com.abk.kernel.utils.DownloadDirectoryUtils
+import com.abk.kernel.utils.ForkSigningImportError
+import com.abk.kernel.utils.ForkSigningImportException
+import com.abk.kernel.utils.ForkSigningMaterial
 import com.abk.kernel.utils.ForkSigningManager
+import com.abk.kernel.utils.ForkSigningPublicKeyResolver
+import com.abk.kernel.utils.ForkSigningPublicKeyValue
 import com.abk.kernel.utils.DownloadUtils
 import com.abk.kernel.utils.FailureLogExtractor
+import com.abk.kernel.utils.INVALID_FORK_SIGNING_PUBLIC_KEY_MESSAGE
 import com.abk.kernel.utils.NotificationUtils
 import com.abk.kernel.utils.WorkflowStepI18n
+import com.abk.kernel.utils.BUNDLED_SUSFS_VERSION
 import com.abk.kernel.utils.RootUtils
+import com.abk.kernel.utils.defaultSusfsConfig
+import com.abk.kernel.utils.normalizeSusfsConfig
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.CancellationException
@@ -56,9 +67,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.UUID
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 // ── UI State ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +103,20 @@ data class BuildPlanImportPreview(
     val scope: BuildPlanShareScope
 )
 
+data class CustomKernelOptionsImportResult(
+    val options: List<CustomKernelOption>,
+    val importedCount: Int,
+    val skippedCount: Int,
+    val duplicateCount: Int
+)
+
+data class CustomKernelOptionSummary(
+    val total: Int,
+    val enabled: Int,
+    val disabled: Int,
+    val ignored: Int
+)
+
 data class MainUiState(
     val authStep: AuthStep = AuthStep.INTRO,
     val rootGranted: Boolean = false,
@@ -98,6 +126,7 @@ data class MainUiState(
     val behindBy: Int = 0,
     val showSyncPrompt: Boolean = false,
     val showOobe: Boolean = false,
+    val showPreferencesResetNotice: Boolean = false,
     val oobeCompleted: Boolean = false,
     val isLoading: Boolean = false,
     val error: String? = null,
@@ -178,9 +207,17 @@ data class MainUiState(
     val customBackgroundUri: String? = null,
     val backgroundImageEnabled: Boolean = false,
     val uiSurfaceAlpha: Float = 1f,
+    val blurEnabled: Boolean = true,
+    val blurBackgroundExpEnabled: Boolean = false,
     val downloadDirectory: String = DownloadDirectoryUtils.defaultDirectoryPath(),
     val downloadMirrorBaseUrl: String = "",
+    val downloadThreadCount: Int = PreferencesRepository.DEFAULT_DOWNLOAD_THREAD_COUNT,
     val prebuiltGkiEnabled: Boolean = true,
+    val artifactSigningVerificationEnabled: Boolean = true,
+    val artifactSigningConfigured: Boolean = false,
+    val artifactSigningOperationInFlight: Boolean = false,
+    val customSourceSecretConfigured: Boolean = false,
+    val customSourceSecretOperationInFlight: Boolean = false,
     val appUpdateStability: String = APP_UPDATE_STABILITY_STABLE,
     val appUpdateLine: String = APP_UPDATE_LINE_NORMAL,
     val appUpdateChecking: Boolean = false,
@@ -207,6 +244,16 @@ data class MainUiState(
     val managerSettingsLoading: Boolean = false,
     val managerSettingsError: String? = null,
     val managerSettingActionId: String? = null,
+    val kernelTcpCongestionControl: KernelTcpCongestionControlState? = null,
+    val kernelCapabilitiesLoading: Boolean = false,
+    val kernelCapabilitiesError: String? = null,
+    val kernelCapabilityActionId: String? = null,
+    val susfsRuntimeStatus: SusfsRuntimeStatus? = null,
+    val susfsConfig: SusfsConfig = defaultSusfsConfig(),
+    val susfsLoading: Boolean = false,
+    val susfsSaving: Boolean = false,
+    val susfsError: String? = null,
+    val susfsLastApplyOutput: List<String> = emptyList(),
     val managerToolsLoading: Boolean = false,
     val managerToolsError: String? = null,
     val managerToolActionId: String? = null,
@@ -231,6 +278,15 @@ data class MainUiState(
 ) {
     val isDownloading: Boolean
         get() = activeDownloadTasks.isNotEmpty() || downloadProgress.isNotEmpty()
+
+    /** Blur preferences snapshot for [BlurScreenScaffold]. */
+    val blurConfig: BlurConfig
+        get() = BlurConfig(
+            blurEnabled = blurEnabled,
+            backgroundExpEnabled = blurBackgroundExpEnabled,
+            backgroundUri = customBackgroundUri,
+            backgroundImageEnabled = backgroundImageEnabled,
+        )
 }
 
 class MainViewModel @JvmOverloads constructor(
@@ -242,6 +298,10 @@ class MainViewModel @JvmOverloads constructor(
 
     private val prefs = PreferencesRepository(application)
     val github: GitHubRepository = github
+    private val forkSigningPublicKeyResolver = ForkSigningPublicKeyResolver(
+        assetName = FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME,
+        downloadReleaseAssetText = this.github::downloadReleaseAssetText
+    )
     private val gson = Gson()
     private val ksuModuleListType = object : TypeToken<List<Map<String, Any?>>>() {}.type
     private var hasSavedBuildConfig = false
@@ -264,6 +324,7 @@ class MainViewModel @JvmOverloads constructor(
     private var buildQueueJob: Job? = null
     private var recentRunsRefreshJob: Job? = null
     private var recentRunsRefreshGeneration = 0
+    private var recentRunsRefreshIncludesCompletedArtifacts = false
     private val lateFailedArtifactWatchJobs = mutableMapOf<Long, Job>()
     private var foregroundWorkflowRefreshJob: Job? = null
     private var foregroundWorkflowRefreshIntervalSec =
@@ -278,8 +339,21 @@ class MainViewModel @JvmOverloads constructor(
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
+    private val _uiSurfaceAlphaPreview = MutableStateFlow(1f)
+    val uiSurfaceAlphaPreview: StateFlow<Float> = _uiSurfaceAlphaPreview.asStateFlow()
+    private var uiSurfaceAlphaPreviewDirty = false
+
     private fun text(@StringRes resId: Int, vararg args: Any): String =
         LocaleHelper.str(resId, *args)
+
+    @StringRes
+    private fun importSigningErrorMessage(reason: ForkSigningImportError): Int = when (reason) {
+        ForkSigningImportError.EMPTY_PUBLIC_KEY -> R.string.settings_security_import_public_key_required
+        ForkSigningImportError.EMPTY_PRIVATE_KEY -> R.string.settings_security_import_private_key_required
+        ForkSigningImportError.INVALID_PUBLIC_KEY -> R.string.settings_security_import_invalid_public_key
+        ForkSigningImportError.INVALID_PRIVATE_KEY -> R.string.settings_security_import_invalid_private_key
+        ForkSigningImportError.KEY_MISMATCH -> R.string.settings_security_import_key_pair_mismatch
+    }
 
     private fun managerAccessErrorMessage(
         access: RootUtils.ManagerAccessInfo,
@@ -428,9 +502,30 @@ class MainViewModel @JvmOverloads constructor(
             str = { resId, args -> text(resId, *args) },
         )
         observePreferences()
+        migrateBackgroundUriToInternalStorage()
         observeForegroundWorkflowRefresh()
         if (registerStatusBroadcast) {
             registerStatusReceiver()
+        }
+    }
+
+    /**
+     * One-time migration: older installs persisted the picker's `content://` URI. Copy it
+     * into app-private storage so cold starts decode a local file instead of a cold content
+     * provider (slow wallpaper / black flash after the app is killed and reopened). Runs
+     * only while the stored URI is not already a local file.
+     */
+    private fun migrateBackgroundUriToInternalStorage() {
+        viewModelScope.launch {
+            val uriString = prefs.customBackgroundUri.first() ?: return@launch
+            if (!BackgroundImageStorage.needsCopy(uriString)) return@launch
+            val fileUri = withContext(Dispatchers.IO) {
+                BackgroundImageStorage.copyToInternalStorage(getApplication(), Uri.parse(uriString))
+            } ?: return@launch
+            // Only swap if the user has not picked a different background meanwhile.
+            if (prefs.customBackgroundUri.first() == uriString) {
+                prefs.setBackgroundImageUri(fileUri.toString())
+            }
         }
     }
 
@@ -502,6 +597,11 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
         viewModelScope.launch {
+            prefs.preferencesResetNoticePending.collect { pending ->
+                _uiState.update { state -> state.copy(showPreferencesResetNotice = pending) }
+            }
+        }
+        viewModelScope.launch {
             combine(
                 prefs.themeMode,
                 prefs.dynamicColorEnabled,
@@ -531,6 +631,11 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
         viewModelScope.launch {
+            prefs.downloadThreadCount.collect { count ->
+                _uiState.update { it.copy(downloadThreadCount = count) }
+            }
+        }
+        viewModelScope.launch {
             combine(
                 prefs.customBackgroundUri,
                 prefs.backgroundImageEnabled,
@@ -538,13 +643,39 @@ class MainViewModel @JvmOverloads constructor(
             ) { uri, enabled, alpha ->
                 BackgroundPreferences(uri, enabled, alpha)
             }.collect { backgroundPrefs ->
-                _uiState.update {
-                    it.copy(
-                        customBackgroundUri = backgroundPrefs.uri,
-                        backgroundImageEnabled = backgroundPrefs.enabled,
-                        uiSurfaceAlpha = backgroundPrefs.alpha
-                    )
+                if (!uiSurfaceAlphaPreviewDirty) {
+                    // No drag in progress: keep the preview and the persisted value in
+                    // sync (this also restores the preview after an interrupted drag via
+                    // syncUiSurfaceAlphaPreview()).
+                    _uiSurfaceAlphaPreview.value = backgroundPrefs.alpha
+                    _uiState.update {
+                        it.copy(
+                            customBackgroundUri = backgroundPrefs.uri,
+                            backgroundImageEnabled = backgroundPrefs.enabled,
+                            uiSurfaceAlpha = backgroundPrefs.alpha,
+                        )
+                    }
+                } else {
+                    // Drag in progress: a late DataStore emission from an earlier commit
+                    // must not yank the slider thumb back or override the live preview,
+                    // but background URI/enabled still need to keep up.
+                    _uiState.update {
+                        it.copy(
+                            customBackgroundUri = backgroundPrefs.uri,
+                            backgroundImageEnabled = backgroundPrefs.enabled,
+                        )
+                    }
                 }
+            }
+        }
+        viewModelScope.launch {
+            prefs.blurEnabled.collect { enabled ->
+                _uiState.update { it.copy(blurEnabled = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            prefs.blurBackgroundExpEnabled.collect { enabled ->
+                _uiState.update { it.copy(blurBackgroundExpEnabled = enabled) }
             }
         }
         viewModelScope.launch {
@@ -561,6 +692,26 @@ class MainViewModel @JvmOverloads constructor(
                             loadingPrebuiltGkiAssetReleaseIds = emptySet()
                         )
                     }
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(
+                prefs.artifactSigningVerificationEnabled,
+                prefs.forkArtifactSigningPublicKey,
+                prefs.forkArtifactSigningSecretName,
+                prefs.forkArtifactSigningReleaseTag
+            ) { enabled, publicKey, secretName, releaseTag ->
+                SecuritySigningPreferences(
+                    enabled = enabled,
+                    configured = !publicKey.isNullOrBlank() && !secretName.isNullOrBlank() && !releaseTag.isNullOrBlank()
+                )
+            }.collect { securityPrefs ->
+                _uiState.update {
+                    it.copy(
+                        artifactSigningVerificationEnabled = securityPrefs.enabled,
+                        artifactSigningConfigured = securityPrefs.configured
+                    )
                 }
             }
         }
@@ -802,6 +953,8 @@ class MainViewModel @JvmOverloads constructor(
 
     fun openBuildOobe() = authOobe.openBuildOobe()
 
+    fun openLoginOobe() = authOobe.openLoginOobe()
+
     fun continueOobeToLogin() = authOobe.continueOobeToLogin()
 
     fun skipOobe() = authOobe.skipOobe()
@@ -859,9 +1012,14 @@ class MainViewModel @JvmOverloads constructor(
                     customBackgroundUri = it.customBackgroundUri,
                     backgroundImageEnabled = it.backgroundImageEnabled,
                     uiSurfaceAlpha = it.uiSurfaceAlpha,
+                    blurEnabled = it.blurEnabled,
+                    blurBackgroundExpEnabled = it.blurBackgroundExpEnabled,
                     downloadDirectory = it.downloadDirectory,
                     downloadMirrorBaseUrl = it.downloadMirrorBaseUrl,
                     prebuiltGkiEnabled = it.prebuiltGkiEnabled,
+                    artifactSigningVerificationEnabled = it.artifactSigningVerificationEnabled,
+                    artifactSigningConfigured = it.artifactSigningConfigured,
+                    artifactSigningOperationInFlight = it.artifactSigningOperationInFlight,
                     predictiveBackEnabled = it.predictiveBackEnabled,
                     runtimeNavigationEnabled = it.runtimeNavigationEnabled,
                     webViewDebugEnabled = it.webViewDebugEnabled,
@@ -1085,8 +1243,295 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun readStateUserLogin(): String? = _uiState.value.user?.login
 
+    private fun setArtifactSigningOperationInFlight(inFlight: Boolean) {
+        _uiState.update { it.copy(artifactSigningOperationInFlight = inFlight) }
+    }
+
+    private fun requireForkSigningContext(): Pair<String, GitHubRepo>? {
+        val state = _uiState.value
+        val owner = state.user?.login
+        val fork = state.forkRepo
+        return if (owner != null && fork != null) {
+            owner to fork
+        } else {
+            null
+        }
+    }
+
+    private suspend fun getOrCreateForkArtifactSigningRelease(
+        owner: String,
+        fork: GitHubRepo,
+        releaseTag: String,
+    ): Result<GitHubRelease> {
+        val remoteRelease = when (val release = github.getReleaseByTag(owner, fork.name, releaseTag)) {
+            is Result.Success -> release.data
+            is Result.Error -> return Result.Error("Fork signing init failed: ${release.message}")
+            Result.Loading -> return Result.Loading
+        }
+        return when {
+            remoteRelease != null -> Result.Success(remoteRelease)
+            else -> when (val created = github.createRelease(
+                owner,
+                fork.name,
+                CreateReleaseRequest(
+                    tagName = releaseTag,
+                    targetCommitish = fork.defaultBranch,
+                    name = "ABK Artifact Signing Key",
+                    body = "ABK fork-scoped artifact signing public key.",
+                    prerelease = true
+                )
+            )) {
+                is Result.Success -> Result.Success(created.data)
+                is Result.Error -> Result.Error("Fork signing release init failed: ${created.message}")
+                Result.Loading -> Result.Loading
+            }
+        }
+    }
+
+    private data class ForkArtifactSigningStateSnapshot(
+        val publicKeyBase64: String?,
+        val secretName: String?,
+        val releaseTag: String?,
+    )
+
+    private suspend fun readForkArtifactSigningStateSnapshot(): ForkArtifactSigningStateSnapshot =
+        ForkArtifactSigningStateSnapshot(
+            publicKeyBase64 = prefs.forkArtifactSigningPublicKey.first(),
+            secretName = prefs.forkArtifactSigningSecretName.first(),
+            releaseTag = prefs.forkArtifactSigningReleaseTag.first()
+        )
+
+    private suspend fun restoreForkArtifactSigningState(snapshot: ForkArtifactSigningStateSnapshot) {
+        if (
+            snapshot.publicKeyBase64 != null &&
+            snapshot.secretName != null &&
+            snapshot.releaseTag != null
+        ) {
+            prefs.saveForkArtifactSigningState(
+                snapshot.publicKeyBase64,
+                snapshot.secretName,
+                snapshot.releaseTag
+            )
+            return
+        }
+        prefs.clearForkArtifactSigningState()
+        snapshot.publicKeyBase64?.let { prefs.saveForkArtifactSigningPublicKey(it) }
+        snapshot.secretName?.let { prefs.saveForkArtifactSigningSecretName(it) }
+        snapshot.releaseTag?.let { prefs.saveForkArtifactSigningReleaseTag(it) }
+    }
+
+    private suspend fun resolveForkArtifactSigningPublicKeyPem(
+        owner: String,
+        fork: GitHubRepo,
+        release: GitHubRelease,
+    ): String? {
+        forkSigningPublicKeyResolver.parse(prefs.forkArtifactSigningPublicKey.first())
+            ?.let { return it.pem }
+        return when (val resolved = forkSigningPublicKeyResolver.download(owner, fork.name, release.id)) {
+            is Result.Success -> resolved.data.pem
+            else -> null
+        }
+    }
+
+    private suspend fun replaceForkArtifactSigningPublicKeyAsset(
+        owner: String,
+        fork: GitHubRepo,
+        release: GitHubRelease,
+        publicKeyPem: String?,
+    ): Result<Unit> {
+        val releaseAssets = when (val assets = github.listReleaseAssets(owner, fork.name, release.id)) {
+            is Result.Success -> assets.data
+            is Result.Error -> return Result.Error("Fork signing asset query failed: ${assets.message}")
+            Result.Loading -> return Result.Loading
+        }
+        releaseAssets.filter { it.name == FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME }.forEach { asset ->
+            when (val deleted = github.deleteReleaseAsset(owner, fork.name, asset.id)) {
+                is Result.Success -> Unit
+                is Result.Error -> return Result.Error("Fork signing public key delete failed: ${deleted.message}")
+                Result.Loading -> return Result.Loading
+            }
+        }
+        val normalizedPem = publicKeyPem?.trim().orEmpty()
+        if (normalizedPem.isBlank()) {
+            return Result.Success(Unit)
+        }
+        return when (val uploaded = github.uploadReleaseAsset(
+            uploadUrlTemplate = release.uploadUrl ?: "",
+            fileName = FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME,
+            contentType = "application/x-pem-file",
+            content = normalizedPem.toByteArray(StandardCharsets.UTF_8)
+        )) {
+            is Result.Success -> Result.Success(Unit)
+            is Result.Error -> Result.Error("Fork signing public key publish failed: ${uploaded.message}")
+            Result.Loading -> Result.Loading
+        }
+    }
+
+    private suspend fun publishForkArtifactSigningMaterial(
+        owner: String,
+        fork: GitHubRepo,
+        material: ForkSigningMaterial,
+        secretName: String = FORK_ARTIFACT_SIGNING_SECRET_NAME,
+        releaseTag: String = FORK_ARTIFACT_SIGNING_RELEASE_TAG,
+    ): Result<Unit> {
+        val release = when (val result = getOrCreateForkArtifactSigningRelease(owner, fork, releaseTag)) {
+            is Result.Success -> result.data
+            is Result.Error -> return result
+            Result.Loading -> return Result.Loading
+        }
+        val previousState = readForkArtifactSigningStateSnapshot()
+        val previousPublicKeyPem = resolveForkArtifactSigningPublicKeyPem(owner, fork, release)
+
+        when (val replaced = replaceForkArtifactSigningPublicKeyAsset(owner, fork, release, material.publicKeyPem)) {
+            is Result.Success -> Unit
+            is Result.Error -> {
+                val rollbackErrors = mutableListOf<String>()
+                when (val rollbackAsset = replaceForkArtifactSigningPublicKeyAsset(owner, fork, release, previousPublicKeyPem)) {
+                    is Result.Success -> Unit
+                    is Result.Error -> rollbackErrors += rollbackAsset.message
+                    Result.Loading -> rollbackErrors += "Rollback asset restore is still loading"
+                }
+                val suffix = rollbackErrors.takeIf { it.isNotEmpty() }?.joinToString("; ", prefix = " Rollback: ") ?: ""
+                return Result.Error("${replaced.message}$suffix")
+            }
+            Result.Loading -> return Result.Loading
+        }
+
+        val saveError = try {
+            prefs.saveForkArtifactSigningState(material.publicKeyBase64, secretName, releaseTag)
+            null
+        } catch (error: Throwable) {
+            error
+        }
+        if (saveError != null) {
+            val rollbackErrors = mutableListOf<String>()
+            when (val rollbackAsset = replaceForkArtifactSigningPublicKeyAsset(owner, fork, release, previousPublicKeyPem)) {
+                is Result.Success -> Unit
+                is Result.Error -> rollbackErrors += rollbackAsset.message
+                Result.Loading -> rollbackErrors += "Rollback asset restore is still loading"
+            }
+            try {
+                restoreForkArtifactSigningState(previousState)
+            } catch (error: Throwable) {
+                rollbackErrors += "Fork signing local state restore failed: ${error.message ?: "Unknown error"}"
+            }
+            val suffix = rollbackErrors.takeIf { it.isNotEmpty() }?.joinToString("; ", prefix = " Rollback: ") ?: ""
+            return Result.Error("Fork signing local state save failed: ${saveError.message ?: "Unknown error"}$suffix")
+        }
+
+        return when (val secret = github.createOrUpdateRepositorySecret(owner, fork.name, secretName, material.privateKeyBase64)) {
+            is Result.Success -> Result.Success(Unit)
+            is Result.Error -> {
+                val rollbackErrors = mutableListOf<String>()
+                when (val rollbackAsset = replaceForkArtifactSigningPublicKeyAsset(owner, fork, release, previousPublicKeyPem)) {
+                    is Result.Success -> Unit
+                    is Result.Error -> rollbackErrors += rollbackAsset.message
+                    Result.Loading -> rollbackErrors += "Rollback asset restore is still loading"
+                }
+                try {
+                    restoreForkArtifactSigningState(previousState)
+                } catch (error: Throwable) {
+                    rollbackErrors += "Fork signing local state restore failed: ${error.message ?: "Unknown error"}"
+                }
+                val suffix = rollbackErrors.takeIf { it.isNotEmpty() }?.joinToString("; ", prefix = " Rollback: ") ?: ""
+                Result.Error("Fork signing secret init failed: ${secret.message}$suffix")
+            }
+            Result.Loading -> Result.Loading
+        }
+    }
+
+    private suspend fun regenerateForkArtifactSigningMaterial(
+        owner: String,
+        fork: GitHubRepo,
+        secretName: String = FORK_ARTIFACT_SIGNING_SECRET_NAME,
+        releaseTag: String = FORK_ARTIFACT_SIGNING_RELEASE_TAG,
+    ): Result<Unit> {
+        val material = ForkSigningManager.generateSigningMaterial()
+        return publishForkArtifactSigningMaterial(owner, fork, material, secretName, releaseTag)
+    }
+
+    private suspend fun deleteForkArtifactSigningMaterial(
+        owner: String,
+        fork: GitHubRepo,
+        secretName: String,
+        releaseTag: String,
+    ): Result<Unit> {
+        when (val release = github.getReleaseByTag(owner, fork.name, releaseTag)) {
+            is Result.Success -> {
+                release.data?.let { foundRelease ->
+                    when (val assets = github.listReleaseAssets(owner, fork.name, foundRelease.id)) {
+                        is Result.Success -> {
+                            assets.data.filter { it.name == FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME }.forEach { asset ->
+                                when (val deleted = github.deleteReleaseAsset(owner, fork.name, asset.id)) {
+                                    is Result.Success -> Unit
+                                    is Result.Error -> return Result.Error("Fork signing public key delete failed: ${deleted.message}")
+                                    Result.Loading -> return Result.Loading
+                                }
+                            }
+                        }
+                        is Result.Error -> return Result.Error("Fork signing asset query failed: ${assets.message}")
+                        Result.Loading -> return Result.Loading
+                    }
+                }
+            }
+            is Result.Error -> return Result.Error("Fork signing release query failed: ${release.message}")
+            Result.Loading -> return Result.Loading
+        }
+        return when (val deleted = github.deleteRepositorySecret(owner, fork.name, secretName)) {
+            is Result.Success -> Result.Success(Unit)
+            is Result.Error -> Result.Error("Fork signing secret delete failed: ${deleted.message}")
+            Result.Loading -> Result.Loading
+        }
+    }
+
+    private suspend fun refreshForkArtifactSigningPublicKeyForDownload(
+        owner: String,
+        fork: GitHubRepo,
+    ): Result<String> = forkSigningInitMutex.withLock {
+        val secretName = FORK_ARTIFACT_SIGNING_SECRET_NAME
+        val releaseTag = FORK_ARTIFACT_SIGNING_RELEASE_TAG
+        val release = when (val result = github.getReleaseByTag(owner, fork.name, releaseTag)) {
+            is Result.Success -> result.data
+                ?: return@withLock Result.Error("Fork signing release is missing")
+            is Result.Error -> return@withLock Result.Error(
+                "Fork signing release query failed: ${result.message}"
+            )
+            Result.Loading -> return@withLock Result.Loading
+        }
+        suspend fun readRemotePublicKey(): Result<ForkSigningPublicKeyValue> =
+            forkSigningPublicKeyResolver.download(owner, fork.name, release.id)
+        val firstPublicKey = when (val result = readRemotePublicKey()) {
+            is Result.Success -> result.data
+            is Result.Error -> return@withLock Result.Error(result.message, result.code)
+            Result.Loading -> return@withLock Result.Loading
+        }
+        val secretExists = when (val result = github.listRepositorySecrets(owner, fork.name)) {
+            is Result.Success -> result.data.any { it.name == secretName }
+            is Result.Error -> return@withLock Result.Error(
+                "Fork signing secret query failed: ${result.message}"
+            )
+            Result.Loading -> return@withLock Result.Loading
+        }
+        if (!secretExists) {
+            return@withLock Result.Error("Fork signing Secret is missing")
+        }
+        val secondPublicKey = when (val result = readRemotePublicKey()) {
+            is Result.Success -> result.data
+            is Result.Error -> return@withLock Result.Error(result.message, result.code)
+            Result.Loading -> return@withLock Result.Loading
+        }
+        if (firstPublicKey.base64 != secondPublicKey.base64) {
+            return@withLock Result.Error(
+                "Fork signing public key changed during refresh"
+            )
+        }
+        prefs.saveForkArtifactSigningState(firstPublicKey.base64, secretName, releaseTag)
+        Result.Success(firstPublicKey.pem)
+    }
+
     private suspend fun ensureForkArtifactSigningReady(owner: String, fork: GitHubRepo) {
         forkSigningInitMutex.withLock {
+            if (!prefs.artifactSigningVerificationEnabled.first()) return
             val secretName = FORK_ARTIFACT_SIGNING_SECRET_NAME
             val releaseTag = FORK_ARTIFACT_SIGNING_RELEASE_TAG
 
@@ -1138,59 +1583,158 @@ class MainViewModel @JvmOverloads constructor(
                 Result.Loading -> return
             }
             val existingPublicKeyAsset = releaseAssets.firstOrNull { it.name == FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME }
-            val existingPublicKey = prefs.forkArtifactSigningPublicKey.first()
-            if (secretExists && !existingPublicKey.isNullOrBlank()) {
-                prefs.saveForkArtifactSigningSecretName(secretName)
-                prefs.saveForkArtifactSigningReleaseTag(releaseTag)
-                return
-            }
             if (secretExists && existingPublicKeyAsset != null) {
-                val pem = when (val downloaded = github.downloadReleaseAssetText(owner, fork.name, release.id, FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME)) {
-                    is Result.Success -> downloaded.data
-                    else -> null
-                }
-                if (!pem.isNullOrBlank()) {
-                    val base64 = pem.lineSequence()
-                        .filterNot { it.startsWith("-----") }
-                        .joinToString("")
-                        .trim()
-                    if (base64.isNotBlank()) {
-                        prefs.saveForkArtifactSigningPublicKey(base64)
-                        prefs.saveForkArtifactSigningSecretName(secretName)
-                        prefs.saveForkArtifactSigningReleaseTag(releaseTag)
+                when (val resolved = forkSigningPublicKeyResolver.download(owner, fork.name, release.id)) {
+                    is Result.Success -> {
+                        prefs.saveForkArtifactSigningState(
+                            resolved.data.base64,
+                            secretName,
+                            releaseTag
+                        )
                         return
                     }
+                    is Result.Error -> {
+                        val message = if (resolved.message == INVALID_FORK_SIGNING_PUBLIC_KEY_MESSAGE) {
+                            "Fork signing public key is invalid"
+                        } else {
+                            "Fork signing public key refresh failed: ${resolved.message}"
+                        }
+                        showSnackbar(message, longDuration = true)
+                        return
+                    }
+                    Result.Loading -> return
                 }
             }
+            if (secretExists || existingPublicKeyAsset != null) {
+                showSnackbar(
+                    "Fork signing material is incomplete; retry after key management finishes",
+                    longDuration = true
+                )
+                return
+            }
 
-            val material = ForkSigningManager.generateSigningMaterial()
-            when (val secret = github.createOrUpdateRepositorySecret(owner, fork.name, secretName, material.privateKeyBase64)) {
+            when (val regenerated = regenerateForkArtifactSigningMaterial(owner, fork, secretName, releaseTag)) {
                 is Result.Success -> Unit
-                is Result.Error -> {
-                    showSnackbar("Fork signing secret init failed: ${secret.message}", longDuration = true)
-                    return
-                }
-                Result.Loading -> return
-            }
-
-            releaseAssets.filter { it.name == FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME }.forEach { asset ->
-                github.deleteReleaseAsset(owner, fork.name, asset.id)
-            }
-            when (val uploaded = github.uploadReleaseAsset(
-                uploadUrlTemplate = release.uploadUrl ?: "",
-                fileName = FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME,
-                contentType = "application/x-pem-file",
-                content = material.publicKeyPem.toByteArray(StandardCharsets.UTF_8)
-            )) {
-                is Result.Success -> {
-                    prefs.saveForkArtifactSigningPublicKey(material.publicKeyBase64)
-                    prefs.saveForkArtifactSigningSecretName(secretName)
-                    prefs.saveForkArtifactSigningReleaseTag(releaseTag)
-                }
-                is Result.Error -> {
-                    showSnackbar("Fork signing public key publish failed: ${uploaded.message}", longDuration = true)
-                }
+                is Result.Error -> showSnackbar(regenerated.message, longDuration = true)
                 Result.Loading -> {}
+            }
+        }
+    }
+
+    suspend fun importArtifactSigningKeys(
+        publicKeyPem: String,
+        privateKeyPem: String,
+    ): Result<Unit> {
+        val context = requireForkSigningContext()
+        if (context == null) {
+            return Result.Error(text(R.string.settings_security_requires_fork))
+        }
+        if (!prefs.artifactSigningVerificationEnabled.first()) {
+            return Result.Error(text(R.string.settings_security_import_requires_enabled))
+        }
+        if (_uiState.value.artifactSigningOperationInFlight) {
+            return Result.Error(text(R.string.settings_security_operation_running))
+        }
+        val (owner, fork) = context
+        setArtifactSigningOperationInFlight(true)
+        return try {
+            forkSigningInitMutex.withLock {
+                val material = try {
+                    ForkSigningManager.importSigningMaterial(publicKeyPem, privateKeyPem)
+                } catch (error: ForkSigningImportException) {
+                    return@withLock Result.Error(text(importSigningErrorMessage(error.reason)))
+                }
+                when (val published = publishForkArtifactSigningMaterial(owner, fork, material)) {
+                    is Result.Success -> {
+                        showSnackbar(text(R.string.settings_security_import_done))
+                        Result.Success(Unit)
+                    }
+                    is Result.Error -> Result.Error(published.message)
+                    Result.Loading -> Result.Loading
+                }
+            }
+        } finally {
+            setArtifactSigningOperationInFlight(false)
+        }
+    }
+
+    fun disableArtifactSigningVerification() {
+        val context = requireForkSigningContext()
+        if (context == null) {
+            showSnackbar(text(R.string.settings_security_requires_fork), longDuration = true)
+            return
+        }
+        if (_uiState.value.artifactSigningOperationInFlight) return
+        val (owner, fork) = context
+        viewModelScope.launch {
+            setArtifactSigningOperationInFlight(true)
+            try {
+                forkSigningInitMutex.withLock {
+                    val secretName = prefs.forkArtifactSigningSecretName.first() ?: FORK_ARTIFACT_SIGNING_SECRET_NAME
+                    val releaseTag = prefs.forkArtifactSigningReleaseTag.first() ?: FORK_ARTIFACT_SIGNING_RELEASE_TAG
+                    when (val result = deleteForkArtifactSigningMaterial(owner, fork, secretName, releaseTag)) {
+                        is Result.Success -> {
+                            prefs.clearForkArtifactSigningState()
+                            prefs.setArtifactSigningVerificationEnabled(false)
+                            showSnackbar(text(R.string.settings_security_signing_disabled))
+                        }
+                        is Result.Error -> showSnackbar(result.message, longDuration = true)
+                        Result.Loading -> Unit
+                    }
+                }
+            } finally {
+                setArtifactSigningOperationInFlight(false)
+            }
+        }
+    }
+
+    fun enableArtifactSigningVerification() {
+        val context = requireForkSigningContext()
+        if (context == null) {
+            showSnackbar(text(R.string.settings_security_requires_fork), longDuration = true)
+            return
+        }
+        if (_uiState.value.artifactSigningOperationInFlight) return
+        val (owner, fork) = context
+        viewModelScope.launch {
+            setArtifactSigningOperationInFlight(true)
+            try {
+                forkSigningInitMutex.withLock {
+                    when (val result = regenerateForkArtifactSigningMaterial(owner, fork)) {
+                        is Result.Success -> {
+                            prefs.setArtifactSigningVerificationEnabled(true)
+                            showSnackbar(text(R.string.settings_security_signing_enabled))
+                        }
+                        is Result.Error -> showSnackbar(result.message, longDuration = true)
+                        Result.Loading -> Unit
+                    }
+                }
+            } finally {
+                setArtifactSigningOperationInFlight(false)
+            }
+        }
+    }
+
+    fun resetArtifactSigningKeys() {
+        val context = requireForkSigningContext()
+        if (context == null) {
+            showSnackbar(text(R.string.settings_security_requires_fork), longDuration = true)
+            return
+        }
+        if (_uiState.value.artifactSigningOperationInFlight) return
+        val (owner, fork) = context
+        viewModelScope.launch {
+            setArtifactSigningOperationInFlight(true)
+            try {
+                forkSigningInitMutex.withLock {
+                    when (val result = regenerateForkArtifactSigningMaterial(owner, fork)) {
+                        is Result.Success -> showSnackbar(text(R.string.settings_security_keys_reset_done))
+                        is Result.Error -> showSnackbar(result.message, longDuration = true)
+                        Result.Loading -> Unit
+                    }
+                }
+            } finally {
+                setArtifactSigningOperationInFlight(false)
             }
         }
     }
@@ -1281,13 +1825,134 @@ class MainViewModel @JvmOverloads constructor(
 
     // ── Build ─────────────────────────────────────────────────────────────
 
-    fun dispatchBuild(config: KernelBuildConfig) {
+    fun dispatchBuild(
+        config: KernelBuildConfig,
+        customSourcePat: String = "",
+        useDeviceFlowToken: Boolean = false,
+    ) {
         val state = _uiState.value
         if (!state.isLoggedIn || state.user == null || state.forkRepo == null) {
             _uiState.update { it.copy(error = text(R.string.vm_build_login_required)) }
             return
         }
-        enqueueBuild(config)
+        val normalized = KernelSupport.normalize(config)
+        KernelSupport.validateCustomSource(normalized)?.let { validationError ->
+            _uiState.update { it.copy(error = validationError) }
+            return
+        }
+        if (normalized.buildTarget != BUILD_TARGET_CUSTOM_SOURCE ||
+            normalized.sourceAccessMode != SOURCE_ACCESS_GITHUB_PRIVATE
+        ) {
+            enqueueBuild(normalized)
+            return
+        }
+
+        viewModelScope.launch {
+            val owner = state.user.login
+            val fork = state.forkRepo
+            _uiState.update { it.copy(customSourceSecretOperationInFlight = true, error = null) }
+            try {
+                val supplied = when {
+                    customSourcePat.isNotBlank() -> customSourcePat.trim()
+                    useDeviceFlowToken -> prefs.accessToken.first().orEmpty()
+                    else -> ""
+                }
+                if (supplied.isNotBlank()) {
+                    when (val result = github.createOrUpdateRepositorySecret(
+                        owner,
+                        fork.name,
+                        FORK_CUSTOM_SOURCE_SECRET_NAME,
+                        supplied,
+                    )) {
+                        is Result.Success -> _uiState.update { it.copy(customSourceSecretConfigured = true) }
+                        is Result.Error -> {
+                            _uiState.update { it.copy(error = result.message) }
+                            return@launch
+                        }
+                        Result.Loading -> return@launch
+                    }
+                } else if (!refreshCustomSourceSecretStatusInternal(owner, fork.name)) {
+                    _uiState.update { it.copy(error = text(R.string.build_source_private_credential_required)) }
+                    return@launch
+                }
+                enqueueBuild(normalized)
+            } finally {
+                _uiState.update { it.copy(customSourceSecretOperationInFlight = false) }
+            }
+        }
+    }
+
+    fun refreshCustomSourceSecretStatus() {
+        val state = _uiState.value
+        val owner = state.user?.login ?: return
+        val repo = state.forkRepo?.name ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(customSourceSecretOperationInFlight = true) }
+            try {
+                refreshCustomSourceSecretStatusInternal(owner, repo)
+            } finally {
+                _uiState.update { it.copy(customSourceSecretOperationInFlight = false) }
+            }
+        }
+    }
+
+    private suspend fun refreshCustomSourceSecretStatusInternal(owner: String, repo: String): Boolean {
+        return when (val result = github.listRepositorySecrets(owner, repo)) {
+            is Result.Success -> result.data.any { it.name == FORK_CUSTOM_SOURCE_SECRET_NAME }.also { configured ->
+                _uiState.update { it.copy(customSourceSecretConfigured = configured) }
+            }
+            is Result.Error -> {
+                _uiState.update { it.copy(error = result.message) }
+                false
+            }
+            Result.Loading -> false
+        }
+    }
+
+    fun deleteCustomSourceSecret() {
+        val state = _uiState.value
+        val owner = state.user?.login ?: return
+        val repo = state.forkRepo?.name ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(customSourceSecretOperationInFlight = true, error = null) }
+            try {
+                when (val result = github.deleteRepositorySecret(owner, repo, FORK_CUSTOM_SOURCE_SECRET_NAME)) {
+                    is Result.Success -> _uiState.update { it.copy(customSourceSecretConfigured = false) }
+                    is Result.Error -> _uiState.update { it.copy(error = result.message) }
+                    Result.Loading -> Unit
+                }
+            } finally {
+                _uiState.update { it.copy(customSourceSecretOperationInFlight = false) }
+            }
+        }
+    }
+
+    fun updateCustomSourceSecret(secretValue: String = "", useDeviceFlowToken: Boolean = false) {
+        val state = _uiState.value
+        val owner = state.user?.login ?: return
+        val repo = state.forkRepo?.name ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(customSourceSecretOperationInFlight = true, error = null) }
+            try {
+                val value = if (useDeviceFlowToken) prefs.accessToken.first().orEmpty() else secretValue.trim()
+                if (value.isBlank()) {
+                    _uiState.update { it.copy(error = text(R.string.build_source_private_credential_required)) }
+                    return@launch
+                }
+                when (val result = github.createOrUpdateRepositorySecret(
+                    owner,
+                    repo,
+                    FORK_CUSTOM_SOURCE_SECRET_NAME,
+                    value,
+                )) {
+                    is Result.Success -> _uiState.update { it.copy(customSourceSecretConfigured = true) }
+                    is Result.Error -> _uiState.update { it.copy(error = result.message) }
+                    Result.Loading -> Unit
+                }
+            } finally {
+                _uiState.update { it.copy(customSourceSecretOperationInFlight = false) }
+            }
+        }
     }
 
     private fun enqueueBuild(config: KernelBuildConfig) {
@@ -1465,17 +2130,25 @@ class MainViewModel @JvmOverloads constructor(
 
     fun loadRecentRuns(
         showRefreshIndicator: Boolean = true,
-        lightweight: Boolean = false
+        lightweight: Boolean = false,
+        includeCompletedArtifacts: Boolean = false,
     ) {
         val state = _uiState.value
         val username = state.user?.login ?: return
         val repoName = state.forkRepo?.name ?: return
         val userInitiatedFull = showRefreshIndicator && !lightweight
+        val shouldIncludeCompleted = shouldIncludeCompletedArtifacts(
+            lightweight = lightweight,
+            includeCompletedArtifacts = includeCompletedArtifacts,
+        )
         if (recentRunsRefreshJob?.isActive == true) {
-            if (!userInitiatedFull) return
+            if (!userInitiatedFull &&
+                (!shouldIncludeCompleted || recentRunsRefreshIncludesCompletedArtifacts)
+            ) return
             recentRunsRefreshJob?.cancel()
         }
         val generation = ++recentRunsRefreshGeneration
+        recentRunsRefreshIncludesCompletedArtifacts = shouldIncludeCompleted
         recentRunsRefreshJob = viewModelScope.launch {
             _uiState.update { it.copy(isRefreshingRecentRuns = true) }
             try {
@@ -1507,7 +2180,7 @@ class MainViewModel @JvmOverloads constructor(
                             username,
                             repoName,
                             r.data,
-                            includeCompleted = !lightweight,
+                            includeCompleted = shouldIncludeCompleted,
                             includeCompletedPureManagers = lightweight,
                         )
                     }
@@ -1517,6 +2190,7 @@ class MainViewModel @JvmOverloads constructor(
                 if (generation == recentRunsRefreshGeneration) {
                     _uiState.update { it.copy(isRefreshingRecentRuns = false) }
                     recentRunsRefreshJob = null
+                    recentRunsRefreshIncludesCompletedArtifacts = false
                 }
             }
         }
@@ -1532,6 +2206,10 @@ class MainViewModel @JvmOverloads constructor(
             override fun onStop(owner: LifecycleOwner) {
                 appInForeground = false
                 stopForegroundWorkflowRefresh()
+                // Backgrounding (Home / recents) mid-drag never fires the slider's
+                // onValueChangeFinished, so drop the un-persisted preview and restore the
+                // persisted alpha instead of leaving the whole app on a stale value.
+                syncUiSurfaceAlphaPreview()
             }
         })
         viewModelScope.launch {
@@ -2332,7 +3010,8 @@ class MainViewModel @JvmOverloads constructor(
                 text(R.string.vm_prebuilt_gki_label),
                 sourceAssetId = asset.id,
                 downloadDirectory,
-                bundleWithNotices = true
+                bundleWithNotices = true,
+                downloadThreadCount = _uiState.value.downloadThreadCount
             ) { pct ->
                 NotificationUtils.notifyDownloadProgress(getApplication(), pct, asset.name)
                 _uiState.update { s ->
@@ -2405,7 +3084,22 @@ class MainViewModel @JvmOverloads constructor(
                 artifact.toWorkflowRun(),
                 downloadUrl,
                 downloadDirectory,
-                bundleWithNotices = true
+                bundleWithNotices = true,
+                downloadThreadCount = _uiState.value.downloadThreadCount,
+                resolveSigningPublicKeyPem = {
+                    val state = _uiState.value
+                    val fork = state.forkRepo
+                        ?: error("Fork signing context is unavailable")
+                    val owner = fork.owner?.login
+                        ?: state.user?.login
+                        ?: fork.fullName.substringBefore('/').takeIf { it.isNotBlank() }
+                        ?: error("Fork signing context is unavailable")
+                    when (val refreshed = refreshForkArtifactSigningPublicKeyForDownload(owner, fork)) {
+                        is Result.Success -> refreshed.data
+                        is Result.Error -> error(refreshed.message)
+                        Result.Loading -> error("Fork signing public key refresh did not complete")
+                    }
+                }
             ) { pct ->
                 val displayProgress = if (mirrorEnabled) {
                     (50 + pct / 2).coerceIn(50, 100)
@@ -2770,9 +3464,63 @@ class MainViewModel @JvmOverloads constructor(
     fun setCustomThemeColors(themeColorArgb: Int, accentColorArgb: Int) = viewModelScope.launch {
         prefs.setCustomThemeColors(themeColorArgb, accentColorArgb)
     }
-    fun setBackgroundImageUri(uri: String?) = viewModelScope.launch { prefs.setBackgroundImageUri(uri) }
+    /**
+     * Persists the picked background. `content://` picker URIs are first copied into
+     * app-private storage ([BackgroundImageStorage]) so cold starts decode a local file
+     * instead of a (possibly cold) content provider — otherwise the wallpaper can arrive
+     * late / the screen stays black after the app is killed and reopened. Runs in the
+     * view model scope so an early navigation away from the settings screen cannot cancel
+     * the copy. Falls back to the original URI when the copy fails.
+     */
+    fun setBackgroundImageUri(uri: String?) = viewModelScope.launch {
+        val storedUri = if (uri != null && BackgroundImageStorage.needsCopy(uri)) {
+            withContext(Dispatchers.IO) {
+                BackgroundImageStorage.copyToInternalStorage(getApplication(), Uri.parse(uri))
+            }?.toString() ?: uri
+        } else {
+            uri
+        }
+        prefs.setBackgroundImageUri(storedUri)
+    }
     fun setBackgroundImageEnabled(v: Boolean) = viewModelScope.launch { prefs.setBackgroundImageEnabled(v) }
-    fun setUiSurfaceAlpha(alpha: Float) = viewModelScope.launch { prefs.setUiSurfaceAlpha(alpha) }
+    fun setUiSurfaceAlpha(alpha: Float) {
+        val normalized = alpha.coerceIn(0f, 1f)
+        uiSurfaceAlphaPreviewDirty = false
+        _uiSurfaceAlphaPreview.value = normalized
+        viewModelScope.launch { prefs.setUiSurfaceAlpha(normalized) }
+    }
+
+    /**
+     * In-memory preview while the slider is being dragged. Persisted on drag end via
+     * [setUiSurfaceAlpha]; no DataStore write happens per drag tick.
+     */
+    fun setUiSurfaceAlphaPreview(alpha: Float) {
+        uiSurfaceAlphaPreviewDirty = true
+        _uiSurfaceAlphaPreview.value = alpha.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Resets the drag-preview state so the in-memory alpha re-syncs from the persisted
+     * value. Called when the settings page is disposed or the app is backgrounded: an
+     * interrupted drag never fires Slider.onValueChangeFinished, which would otherwise
+     * leave the preview stuck on an un-persisted value for the rest of the session.
+     */
+    fun syncUiSurfaceAlphaPreview() {
+        uiSurfaceAlphaPreviewDirty = false
+        viewModelScope.launch {
+            val persisted = prefs.uiSurfaceAlpha.first()
+            // Re-check: a new drag may have started while the read was in flight.
+            if (!uiSurfaceAlphaPreviewDirty) {
+                _uiSurfaceAlphaPreview.value = persisted
+            }
+        }
+    }
+    fun setBlurEnabled(v: Boolean) = viewModelScope.launch {
+        prefs.setBlurEnabled(v)
+    }
+    fun setBlurBackgroundExpEnabled(v: Boolean) = viewModelScope.launch {
+        prefs.setBlurBackgroundExpEnabled(v)
+    }
     fun acceptTerms() = viewModelScope.launch { prefs.acceptCurrentTerms() }
     suspend fun loadFlashFilterJson(): String? = prefs.flashFilterJson.first()
     fun saveFlashFilterJson(json: String) = viewModelScope.launch { prefs.saveFlashFilterJson(json) }
@@ -2781,6 +3529,9 @@ class MainViewModel @JvmOverloads constructor(
     }
     fun setDownloadMirrorBaseUrl(url: String) = viewModelScope.launch {
         prefs.setDownloadMirrorBaseUrl(url)
+    }
+    fun setDownloadThreadCount(value: Int) = viewModelScope.launch {
+        prefs.setDownloadThreadCount(value)
     }
     fun setPredictiveBackEnabled(v: Boolean) = viewModelScope.launch { prefs.setPredictiveBackEnabled(v) }
     fun setPrebuiltGkiEnabled(v: Boolean) = viewModelScope.launch {
@@ -2906,7 +3657,8 @@ class MainViewModel @JvmOverloads constructor(
                     getApplication(),
                     token = token,
                     url = downloadUrl,
-                    preferredLine = info.line
+                    preferredLine = info.line,
+                    downloadThreadCount = _uiState.value.downloadThreadCount
                 ) { progress ->
                     _uiState.update { state ->
                         state.copy(appUpdateDownloading = true, appUpdateDownloadProgress = progress)
@@ -2947,13 +3699,101 @@ class MainViewModel @JvmOverloads constructor(
         _uiState.update { it.copy(appUpdatePendingInstallPath = null) }
     }
 
+    fun refreshSusfsState(force: Boolean = false) {
+        if (!force && _uiState.value.susfsLoading) return
+        viewModelScope.launch {
+            val rootGranted = _uiState.value.rootGranted
+            _uiState.update { it.copy(susfsLoading = true, susfsError = null) }
+            if (!rootGranted) {
+                _uiState.update {
+                    it.copy(
+                        susfsRuntimeStatus = null,
+                        susfsConfig = defaultSusfsConfig(),
+                        susfsLoading = false,
+                        susfsError = null,
+                        susfsLastApplyOutput = emptyList(),
+                    )
+                }
+                return@launch
+            }
+            val loaded = runCatching {
+                withContext(Dispatchers.IO) {
+                    RootUtils.readSusfsRuntimeStatus() to normalizeSusfsConfig(RootUtils.readSusfsConfig())
+                }
+            }.getOrElse { error ->
+                null to defaultSusfsConfig().also {
+                    _uiState.update {
+                        it.copy(
+                            susfsLoading = false,
+                            susfsError = error.message ?: text(R.string.susfs_load_failed),
+                        )
+                    }
+                }
+            }
+            val status = loaded.first
+            if (status == null) return@launch
+            _uiState.update {
+                it.copy(
+                    susfsRuntimeStatus = status,
+                    susfsConfig = loaded.second,
+                    susfsLoading = false,
+                    susfsError = when {
+                        status.available -> null
+                        status.diagnostics.isNotEmpty() -> status.diagnostics.joinToString("\n")
+                        else -> text(R.string.susfs_unavailable)
+                    },
+                )
+            }
+        }
+    }
+
+    fun applySusfsConfig(config: SusfsConfig) {
+        if (_uiState.value.susfsSaving) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(susfsSaving = true, susfsError = null, susfsLastApplyOutput = emptyList()) }
+            val result = withContext(Dispatchers.IO) {
+                RootUtils.applySusfsConfig(normalizeSusfsConfig(config))
+            }
+            _uiState.update {
+                it.copy(
+                    susfsSaving = false,
+                    susfsLastApplyOutput = result.output,
+                    susfsError = if (result.success) null else {
+                        result.output.lastOrNull { line -> line.isNotBlank() } ?: text(R.string.susfs_apply_failed)
+                    },
+                )
+            }
+            refreshSusfsState(force = true)
+        }
+    }
+
+    fun resetSusfsConfig() {
+        if (_uiState.value.susfsSaving) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(susfsSaving = true, susfsError = null, susfsLastApplyOutput = emptyList()) }
+            val result = withContext(Dispatchers.IO) {
+                RootUtils.resetSusfsConfig()
+            }
+            _uiState.update {
+                it.copy(
+                    susfsSaving = false,
+                    susfsLastApplyOutput = result.output,
+                    susfsError = if (result.success) null else {
+                        result.output.lastOrNull { line -> line.isNotBlank() } ?: text(R.string.susfs_reset_failed)
+                    },
+                )
+            }
+            refreshSusfsState(force = true)
+        }
+    }
+
     fun refreshManagerSettings(force: Boolean = false) {
         if (!force && _uiState.value.managerSettingsLoading) return
         viewModelScope.launch {
             val rootGranted = _uiState.value.rootGranted
             _uiState.update { it.copy(managerSettingsLoading = true, managerSettingsError = null) }
             val access = withContext(Dispatchers.IO) { resolveManagerAccess(rootGranted) }
-            if (!access.hasNativeManagerPermission) {
+            if (access.kind == RootUtils.ManagerAccessKind.NO_ROOT) {
                 _uiState.update {
                     it.copy(
                         managerAccessState = access.toUiState(),
@@ -2971,23 +3811,24 @@ class MainViewModel @JvmOverloads constructor(
             }
             val loaded = runCatching {
                 withContext(Dispatchers.IO) {
-                    loadManagerSettings()
+                    loadManagerSettings(access = access, rootGranted = rootGranted)
                 }
             }.getOrElse { error ->
                 ManagerSettingsLoad(
                     error = error.message?.takeIf { it.isNotBlank() } ?: text(R.string.settings_manager_load_failed)
                 )
             }
+            val accessError = managerAccessErrorMessage(access, rootGranted)
             _uiState.update {
                 it.copy(
                     managerAccessState = access.toUiState(),
-                    managerAccessError = null,
-                    hasNativeManagerPermission = true,
+                    managerAccessError = if (access.hasNativeManagerPermission || loaded.items.isNotEmpty()) null else accessError,
+                    hasNativeManagerPermission = access.hasNativeManagerPermission,
                     managerSettingsBackend = loaded.backend?.trim()?.ifBlank { null },
                     managerSettingsTitle = loaded.title.trim(),
                     managerSettingsItems = sanitizeManagerSettingItems(loaded.items),
                     managerSettingsLoading = false,
-                    managerSettingsError = loaded.error,
+                    managerSettingsError = loaded.error ?: if (!access.hasNativeManagerPermission && loaded.items.isEmpty()) accessError else null,
                     managerSettingActionId = null
                 )
             }
@@ -3069,6 +3910,77 @@ class MainViewModel @JvmOverloads constructor(
                         managerSettingActionId = null,
                         managerSettingsError = result.output.lastOrNull()?.takeIf { line -> line.isNotBlank() }
                             ?: text(R.string.settings_operation_incomplete)
+                    )
+                }
+            }
+        }
+    }
+
+    fun refreshKernelCapabilities(force: Boolean = false) {
+        if (!force && _uiState.value.kernelCapabilitiesLoading) return
+        viewModelScope.launch {
+            val rootGranted = _uiState.value.rootGranted
+            _uiState.update { it.copy(kernelCapabilitiesLoading = true, kernelCapabilitiesError = null) }
+            val access = withContext(Dispatchers.IO) { resolveManagerAccess(rootGranted) }
+            if (access.kind == RootUtils.ManagerAccessKind.NO_ROOT) {
+                val message = managerAccessErrorMessage(access, rootGranted)
+                _uiState.update {
+                    it.copy(
+                        managerAccessState = access.toUiState(),
+                        managerAccessError = message,
+                        hasNativeManagerPermission = false,
+                        kernelTcpCongestionControl = null,
+                        kernelCapabilitiesLoading = false,
+                        kernelCapabilitiesError = message,
+                        kernelCapabilityActionId = null
+                    )
+                }
+                return@launch
+            }
+            val tcp = withContext(Dispatchers.IO) { RootUtils.readTcpCongestionControl() }
+            _uiState.update {
+                it.copy(
+                    managerAccessState = access.toUiState(),
+                    managerAccessError = null,
+                    hasNativeManagerPermission = access.hasNativeManagerPermission,
+                    kernelTcpCongestionControl = tcp,
+                    kernelCapabilitiesLoading = false,
+                    kernelCapabilitiesError = if (tcp?.available == true) {
+                        null
+                    } else {
+                        text(R.string.settings_kernel_capabilities_unavailable)
+                    },
+                    kernelCapabilityActionId = null
+                )
+            }
+        }
+    }
+
+    fun setTcpCongestionControlAlgorithm(algorithm: String) {
+        val clean = algorithm.trim()
+        if (clean.isBlank() || _uiState.value.kernelCapabilityActionId != null) return
+        viewModelScope.launch {
+            val actionId = "$KERNEL_CAPABILITY_TCP_CONGESTION:$clean"
+            _uiState.update {
+                it.copy(kernelCapabilityActionId = actionId, kernelCapabilitiesError = null)
+            }
+            val rootGranted = _uiState.value.rootGranted
+            val result = withContext(Dispatchers.IO) {
+                val access = resolveManagerAccess(rootGranted)
+                if (access.kind == RootUtils.ManagerAccessKind.NO_ROOT) {
+                    RootUtils.ShellResult(false, listOf(managerAccessErrorMessage(access, rootGranted)))
+                } else {
+                    RootUtils.setTcpCongestionControl(clean)
+                }
+            }
+            if (result.success) {
+                refreshKernelCapabilities(force = true)
+            } else {
+                _uiState.update {
+                    it.copy(
+                        kernelCapabilityActionId = null,
+                        kernelCapabilitiesError = result.output.lastOrNull()?.takeIf { line -> line.isNotBlank() }
+                            ?: text(R.string.settings_tcp_congestion_change_failed)
                     )
                 }
             }
@@ -3371,17 +4283,41 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun loadManagerSettings(): ManagerSettingsLoad =
+    private fun loadManagerSettings(
+        access: RootUtils.ManagerAccessInfo,
+        rootGranted: Boolean
+    ): ManagerSettingsLoad =
         runCatching {
-            if (!RootUtils.isNativeManagerActive()) {
-                return@runCatching ManagerSettingsLoad()
-            }
-            val snapshot = RootUtils.readManagerRuntimeSnapshot()
-            val manager = snapshot.manager.normalizedForManagerSettings()
-            if (!manager.active) {
-                ManagerSettingsLoad()
+            val kernelCapabilitiesItem = if (rootGranted || access.hasNativeManagerPermission) {
+                buildKernelCapabilitiesManagerSetting()
             } else {
-                when {
+                null
+            }
+            val susfsItem = if (rootGranted) {
+                buildSusfsManagerSetting(RootUtils.readSusfsRuntimeStatus())
+            } else {
+                null
+            }
+
+            if (!access.hasNativeManagerPermission || !RootUtils.isNativeManagerActive()) {
+                val items = listOfNotNull(kernelCapabilitiesItem, susfsItem)
+                if (items.isEmpty()) {
+                    ManagerSettingsLoad()
+                } else {
+                    val manager = access.runtime?.normalizedForManagerSettings()
+                    ManagerSettingsLoad(
+                        backend = manager?.backend?.takeIf { it.isNotBlank() } ?: "kernel",
+                        title = manager?.let { managerSettingsTitle(it) } ?: text(R.string.settings_kernel_capabilities),
+                        items = items
+                    )
+                }
+            } else {
+                val snapshot = RootUtils.readManagerRuntimeSnapshot()
+                val manager = snapshot.manager.normalizedForManagerSettings()
+                val base = if (!manager.active) {
+                    ManagerSettingsLoad()
+                } else {
+                    when {
                     manager.isReSukiSu() -> ManagerSettingsLoad(
                         backend = "resukisu",
                         title = "ReSukiSU",
@@ -3403,12 +4339,61 @@ class MainViewModel @JvmOverloads constructor(
                         error = buildUnknownManagerSettingsError(manager)
                     )
                 }
+                }
+                base.copy(
+                    items = mergeManagerNavigationItems(
+                        baseItems = base.items,
+                        kernelCapabilitiesItem = kernelCapabilitiesItem,
+                        susfsItem = susfsItem
+                    )
+                )
             }
         }.getOrElse { error ->
             ManagerSettingsLoad(
                 error = error.message?.takeIf { it.isNotBlank() } ?: text(R.string.settings_manager_load_failed)
             )
         }
+
+    private fun buildKernelCapabilitiesManagerSetting(): ManagerSettingItem? {
+        val tcp = RootUtils.readTcpCongestionControl()
+            ?.takeIf { RootUtils.hasManageableTcpCongestionControl(it) }
+            ?: return null
+        val current = tcp.currentAlgorithm.ifBlank { text(R.string.settings_unknown) }
+        return ManagerSettingItem(
+            id = MANAGER_SETTING_KERNEL_CAPABILITIES,
+            title = text(R.string.settings_kernel_capabilities),
+            subtitle = text(R.string.settings_kernel_capabilities_summary, current, tcp.availableAlgorithms.size),
+            kind = ManagerSettingKind.NAVIGATION
+        )
+    }
+
+    private fun mergeManagerNavigationItems(
+        baseItems: List<ManagerSettingItem>,
+        kernelCapabilitiesItem: ManagerSettingItem?,
+        susfsItem: ManagerSettingItem?
+    ): List<ManagerSettingItem> {
+        val extraItems = listOfNotNull(kernelCapabilitiesItem, susfsItem)
+        if (extraItems.isEmpty()) return baseItems
+        val insertIndex = baseItems.indexOfFirst { it.kind != ManagerSettingKind.NAVIGATION }
+            .takeIf { it >= 0 }
+            ?: baseItems.size
+        return baseItems.take(insertIndex) + extraItems + baseItems.drop(insertIndex)
+    }
+
+    private fun buildSusfsManagerSetting(status: SusfsRuntimeStatus): ManagerSettingItem? {
+        if (!status.available) return null
+        val subtitle = text(
+            R.string.settings_susfs_control_summary,
+            status.kernelVersion.ifBlank { text(R.string.settings_unknown) },
+            status.bundledBinaryVersion.ifBlank { BUNDLED_SUSFS_VERSION }
+        )
+        return ManagerSettingItem(
+            id = MANAGER_SETTING_SUSFS,
+            title = text(R.string.settings_susfs_control),
+            subtitle = subtitle,
+            kind = ManagerSettingKind.NAVIGATION
+        )
+    }
 
     private fun buildReSukiSuSettings(): List<ManagerSettingItem> {
         val suCompat = RootUtils.readKsuFeature("su_compat")
@@ -3818,14 +4803,13 @@ class MainViewModel @JvmOverloads constructor(
         scope: BuildPlanShareScope
     ): String {
         val normalized = KernelSupport.normalize(config)
-        val payload = Base64.getUrlEncoder().withoutPadding().encodeToString(
-            encodeBuildPlanPayload(
-                config = normalized,
-                name = sanitizeBuildPlanName(name, normalized),
-                scope = scope,
-                messages = buildPlanCodecMessages()
-            )
+        val encodedPayload = encodeBuildPlanPayload(
+            config = normalized,
+            name = sanitizeBuildPlanName(name, normalized),
+            scope = scope,
+            messages = buildPlanCodecMessages()
         )
+        val payload = Base64.getUrlEncoder().withoutPadding().encodeToString(compressPlanPayload(encodedPayload))
         return "$BUILD_PLAN_CODE_PREFIX$payload"
     }
 
@@ -3873,6 +4857,65 @@ class MainViewModel @JvmOverloads constructor(
 
     fun importBuildPlanToCurrentConfig(preview: BuildPlanImportPreview) {
         updateBuildConfig(preview.plan.config)
+    }
+
+    fun upsertCustomKernelOption(option: CustomKernelOption, editingIndex: Int? = null) {
+        val currentConfig = KernelSupport.normalize(_uiState.value.buildConfig)
+        if (currentConfig.buildTarget == BUILD_TARGET_ONEPLUS) return
+        val symbol = KernelSupport.normalizeCustomKernelSymbol(option.symbol)
+        require(symbol.isNotBlank()) { text(R.string.build_kernel_option_symbol_invalid) }
+        val normalizedOption = CustomKernelOption(
+            symbol = symbol,
+            mode = CustomKernelOptionMode.normalize(option.mode),
+            rawValue = option.rawValue.trim(),
+            source = option.source.trim()
+        )
+        require(
+            normalizedOption.mode != CustomKernelOptionMode.RAW || normalizedOption.rawValue.isNotBlank()
+        ) { text(R.string.build_kernel_option_raw_required) }
+
+        val updated = currentConfig.customKernelOptions.toMutableList().apply {
+            if (editingIndex != null && editingIndex in indices) {
+                removeAt(editingIndex)
+            }
+        }
+        val merged = mergeCustomKernelOptions(updated, listOf(normalizedOption))
+        updateBuildConfig(currentConfig.copy(customKernelOptions = merged))
+    }
+
+    fun removeCustomKernelOption(index: Int) {
+        val currentConfig = KernelSupport.normalize(_uiState.value.buildConfig)
+        if (index !in currentConfig.customKernelOptions.indices) return
+        val updated = currentConfig.customKernelOptions.toMutableList().apply { removeAt(index) }
+        updateBuildConfig(currentConfig.copy(customKernelOptions = updated))
+    }
+
+    fun removeCustomKernelOptions(indices: Collection<Int>) {
+        val currentConfig = KernelSupport.normalize(_uiState.value.buildConfig)
+        if (currentConfig.buildTarget == BUILD_TARGET_ONEPLUS) return
+        val updated = removeCustomKernelOptionsAtIndices(currentConfig.customKernelOptions, indices)
+        if (updated == currentConfig.customKernelOptions) return
+        updateBuildConfig(currentConfig.copy(customKernelOptions = updated))
+    }
+
+    fun clearCustomKernelOptions() {
+        val currentConfig = KernelSupport.normalize(_uiState.value.buildConfig)
+        if (currentConfig.buildTarget == BUILD_TARGET_ONEPLUS || currentConfig.customKernelOptions.isEmpty()) return
+        updateBuildConfig(currentConfig.copy(customKernelOptions = emptyList()))
+    }
+
+    fun importCustomKernelOptions(text: String): CustomKernelOptionsImportResult {
+        val currentConfig = KernelSupport.normalize(_uiState.value.buildConfig)
+        val imported = parseCustomKernelOptionsText(text)
+        val merged = mergeCustomKernelOptions(currentConfig.customKernelOptions, imported.options)
+        updateBuildConfig(currentConfig.copy(customKernelOptions = merged))
+        return imported
+    }
+
+    fun loadCustomKernelOptionsFromUri(uri: Uri): String {
+        return getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+            input.bufferedReader(StandardCharsets.UTF_8).readText()
+        } ?: error(text(R.string.build_kernel_option_import_read_failed))
     }
 
     fun addBuildModuleRepository(url: String) {
@@ -4593,11 +5636,19 @@ class MainViewModel @JvmOverloads constructor(
         it.copy(snackbarMessage = null, snackbarLongDuration = false)
     }
 
+    fun dismissPreferencesResetNotice() {
+        _uiState.update { it.copy(showPreferencesResetNotice = false) }
+        viewModelScope.launch {
+            prefs.clearPreferencesResetNotice()
+        }
+    }
+
     fun clearCustomExternalModuleError() = _uiState.update { it.copy(customExternalModuleError = null) }
 
     private fun buildPlanCodecMessages(): BuildPlanCodecMessages = BuildPlanCodecMessages(
         unsupportedVersion = text(R.string.vm_plan_bad_version),
         tooManyModules = text(R.string.vm_plan_too_many_modules),
+        tooManyKernelOptions = text(R.string.vm_plan_too_many_kernel_options),
         negativeNumber = text(R.string.vm_plan_negative_number),
         fieldTooLong = text(R.string.vm_plan_field_too_long),
         incomplete = text(R.string.vm_plan_incomplete),
@@ -4632,6 +5683,14 @@ internal fun defaultBuildPlanName(config: KernelBuildConfig): String {
             .filter { it.isNotBlank() }
             .joinToString(" · ")
     }
+    if (config.buildTarget == BUILD_TARGET_CUSTOM_SOURCE) {
+        val sourceName = config.sourceDeviceLabel.ifBlank {
+            config.sourceUrl.substringAfterLast('/').removeSuffix(".git")
+        }
+        return listOf(sourceName, config.sourceRef, config.osPatchLevel)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+    }
     val android = config.androidVersion.removePrefix("android").ifBlank { config.androidVersion }
     return listOf("${config.kernelVersion}.${config.subLevel}", "Android $android", config.kernelsuVariant)
         .filter { it.isNotBlank() }
@@ -4657,6 +5716,17 @@ private fun MainViewModel.localizedBuildModuleRepoTitle(): String =
 private fun padBase64Url(value: String): String =
     value + "=".repeat((4 - value.length % 4) % 4)
 
+private fun compressPlanPayload(bytes: ByteArray): ByteArray {
+    val output = ByteArrayOutputStream()
+    GZIPOutputStream(output).use { gzip -> gzip.write(bytes) }
+    return output.toByteArray()
+}
+
+private fun decompressPlanPayload(bytes: ByteArray): ByteArray {
+    val input = GZIPInputStream(ByteArrayInputStream(bytes))
+    return input.use { it.readBytes() }
+}
+
 internal data class DecodedBuildPlanCode(
     val name: String,
     val config: KernelBuildConfig,
@@ -4666,6 +5736,8 @@ internal data class DecodedBuildPlanCode(
 internal data class BuildPlanCodecMessages(
     val unsupportedVersion: String = "Unsupported plan code version",
     val tooManyModules: String = "External module count exceeds the limit",
+    val tooManyKernelOptions: String = "Kernel option count exceeds the limit",
+    val tooManyDefconfigs: String = "Defconfig count exceeds the limit",
     val negativeNumber: String = "Negative numbers can not be written to a plan code",
     val fieldTooLong: String = "Plan field is too long",
     val incomplete: String = "Plan code content is incomplete",
@@ -4693,6 +5765,12 @@ internal fun encodeBuildPlanPayload(
         writer.writeString(config.buildTarget)
         writer.writeString(config.onePlusCpu)
         writer.writeString(config.onePlusDeviceManifest)
+        writer.writeString(config.sourceUrl)
+        writer.writeString(config.sourceRef)
+        writer.writeString(config.sourceAccessMode)
+        writer.writeVarInt(config.sourceDefconfigs.size)
+        config.sourceDefconfigs.forEach(writer::writeString)
+        writer.writeString(config.sourceDeviceLabel)
     }
     writer.writeByte(BUILD_PLAN_KSU_VARIANTS.indexOrZero(config.kernelsuVariant))
     writer.writeByte(BUILD_PLAN_KSU_BRANCHES.indexOrZero(config.kernelsuBranch))
@@ -4703,6 +5781,27 @@ internal fun encodeBuildPlanPayload(
     writer.writeString(config.zramExtraAlgos)
     writer.writeString(config.kpmPassword)
     writer.writeString(config.customRef)
+    val kernelOptions = config.customKernelOptions
+        .mapNotNull { option ->
+            val symbol = KernelSupport.normalizeCustomKernelSymbol(option.symbol)
+            if (symbol.isBlank()) {
+                null
+            } else {
+                CustomKernelOption(
+                    symbol = symbol,
+                    mode = CustomKernelOptionMode.normalize(option.mode),
+                    rawValue = option.rawValue.trim(),
+                    source = option.source.trim()
+                )
+            }
+        }
+        .take(BUILD_PLAN_MAX_KERNEL_OPTIONS)
+    writer.writeVarInt(kernelOptions.size)
+    kernelOptions.forEach { option ->
+        writer.writeString(option.symbol)
+        writer.writeByte(BUILD_PLAN_KERNEL_OPTION_MODES.indexOrZero(option.mode))
+        writer.writeString(option.rawValue)
+    }
     val modules = if (config.useCustomExternalModules) {
         config.customExternalModules
             .mapNotNull { module ->
@@ -4749,7 +5848,12 @@ internal fun decodeBuildPlanPayload(
     baseConfig: KernelBuildConfig,
     messages: BuildPlanCodecMessages = BuildPlanCodecMessages()
 ): DecodedBuildPlanCode {
-    val reader = BuildPlanBinaryReader(bytes, messages)
+    val payloadBytes = if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
+        decompressPlanPayload(bytes)
+    } else {
+        bytes
+    }
+    val reader = BuildPlanBinaryReader(payloadBytes, messages)
     val version = reader.readByte()
     require(version in BUILD_PLAN_MIN_SUPPORTED_VERSION..BUILD_PLAN_CODE_VERSION) { messages.unsupportedVersion }
     val scope = buildPlanShareScopeFromWireValue(reader.readByte(), messages)
@@ -4761,7 +5865,7 @@ internal fun decodeBuildPlanPayload(
         val osPatchLevel = reader.readString()
         val revision = reader.readString()
         if (version >= BUILD_PLAN_ONEPLUS_FIELDS_VERSION) {
-            baseConfig.copy(
+            val targetBase = baseConfig.copy(
                 androidVersion = androidVersion,
                 kernelVersion = kernelVersion,
                 subLevel = subLevel,
@@ -4771,6 +5875,23 @@ internal fun decodeBuildPlanPayload(
                 onePlusCpu = reader.readString(),
                 onePlusDeviceManifest = reader.readString()
             )
+            if (version >= BUILD_PLAN_CUSTOM_SOURCE_FIELDS_VERSION) {
+                val sourceUrl = reader.readString()
+                val sourceRef = reader.readString()
+                val sourceAccessMode = reader.readString()
+                val defconfigCount = reader.readVarInt()
+                require(defconfigCount in 0..BUILD_PLAN_MAX_DEFCONFIGS) { messages.tooManyDefconfigs }
+                val sourceDefconfigs = List(defconfigCount) { reader.readString() }
+                targetBase.copy(
+                    sourceUrl = sourceUrl,
+                    sourceRef = sourceRef,
+                    sourceAccessMode = sourceAccessMode,
+                    sourceDefconfigs = sourceDefconfigs,
+                    sourceDeviceLabel = reader.readString()
+                )
+            } else {
+                targetBase
+            }
         } else {
             baseConfig.copy(
                 androidVersion = androidVersion,
@@ -4804,6 +5925,22 @@ internal fun decodeBuildPlanPayload(
         reader.readString()
     } else {
         ""
+    }
+    val kernelOptions = if (version >= BUILD_PLAN_KERNEL_OPTIONS_VERSION) {
+        val count = reader.readVarInt()
+        require(count in 0..BUILD_PLAN_MAX_KERNEL_OPTIONS) { messages.tooManyKernelOptions }
+        List(count) {
+            CustomKernelOption(
+                symbol = reader.readString().trim(),
+                mode = BUILD_PLAN_KERNEL_OPTION_MODES.valueOrDefault(
+                    reader.readByte(),
+                    CustomKernelOptionMode.IGNORE
+                ),
+                rawValue = reader.readString().trim()
+            )
+        }
+    } else {
+        emptyList()
     }
     val moduleCount = reader.readVarInt()
     require(moduleCount in 0..BUILD_PLAN_MAX_MODULES) { messages.tooManyModules }
@@ -4853,6 +5990,7 @@ internal fun decodeBuildPlanPayload(
         kpmPassword = kpmPassword,
         customRef = customRef,
         virtualizationSupport = virtualizationSupport,
+        customKernelOptions = kernelOptions,
         useCustomExternalModules = featureMask.hasBuildPlanFlag(10),
         customExternalModules = modules,
         onePlusUseLz4kd = featureMask.hasBuildPlanFlag(11),
@@ -4979,20 +6117,165 @@ private fun buildPlanShareScopeFromWireValue(
     else -> throw IllegalArgumentException(messages.unsupportedShareType)
 }
 
+private val CUSTOM_KERNEL_OPTION_DISABLED_LINE =
+    Regex("^#\\s*CONFIG_([A-Za-z0-9_]+)\\s+is\\s+not\\s+set$", RegexOption.IGNORE_CASE)
+
+private val CUSTOM_KERNEL_OPTION_ASSIGNED_LINE =
+    Regex("^(CONFIG_[A-Za-z0-9_]+)=(.+)$")
+
+private val CUSTOM_KERNEL_OPTION_BARE_LINE =
+    Regex("^(CONFIG_[A-Za-z0-9_]+|[A-Za-z0-9_]+)$")
+
+private data class ParsedCustomKernelOptionLine(
+    val option: CustomKernelOption?,
+    val skipped: Boolean
+)
+
+private fun parseCustomKernelOptionLine(line: String): ParsedCustomKernelOptionLine {
+    val clean = line.trim().replace("\r", "")
+    if (clean.isBlank()) return ParsedCustomKernelOptionLine(option = null, skipped = true)
+    if (clean.startsWith("#") && !clean.startsWith("# CONFIG_", ignoreCase = true)) {
+        return ParsedCustomKernelOptionLine(option = null, skipped = true)
+    }
+
+    CUSTOM_KERNEL_OPTION_DISABLED_LINE.matchEntire(clean)?.let { match ->
+        val symbol = KernelSupport.normalizeCustomKernelSymbol("CONFIG_${match.groupValues[1]}")
+        require(symbol.isNotBlank()) { "Invalid kernel option symbol: $clean" }
+        return ParsedCustomKernelOptionLine(
+            option = CustomKernelOption(symbol = symbol, mode = CustomKernelOptionMode.DISABLED),
+            skipped = false
+        )
+    }
+
+    CUSTOM_KERNEL_OPTION_ASSIGNED_LINE.matchEntire(clean)?.let { match ->
+        val symbol = KernelSupport.normalizeCustomKernelSymbol(match.groupValues[1])
+        require(symbol.isNotBlank()) { "Invalid kernel option symbol: $clean" }
+        val value = match.groupValues[2].trim()
+        val mode = when (value.lowercase()) {
+            "y" -> CustomKernelOptionMode.ENABLED_Y
+            "m" -> CustomKernelOptionMode.ENABLED_M
+            "n" -> CustomKernelOptionMode.DISABLED
+            else -> CustomKernelOptionMode.RAW
+        }
+        return ParsedCustomKernelOptionLine(
+            option = CustomKernelOption(
+                symbol = symbol,
+                mode = mode,
+                rawValue = if (mode == CustomKernelOptionMode.RAW) value else ""
+            ),
+            skipped = false
+        )
+    }
+
+    CUSTOM_KERNEL_OPTION_BARE_LINE.matchEntire(clean)?.let { match ->
+        val symbol = KernelSupport.normalizeCustomKernelSymbol(match.groupValues[1])
+        require(symbol.isNotBlank()) { "Invalid kernel option symbol: $clean" }
+        return ParsedCustomKernelOptionLine(
+            option = CustomKernelOption(symbol = symbol, mode = CustomKernelOptionMode.IGNORE),
+            skipped = false
+        )
+    }
+
+    throw IllegalArgumentException("Unsupported kernel option line: $clean")
+}
+
+internal fun parseCustomKernelOptionsText(text: String): CustomKernelOptionsImportResult {
+    val merged = linkedMapOf<String, CustomKernelOption>()
+    var skippedCount = 0
+    var duplicateCount = 0
+
+    text.lineSequence().forEach { rawLine ->
+        val parsed = parseCustomKernelOptionLine(rawLine)
+        if (parsed.skipped) {
+            skippedCount += 1
+            return@forEach
+        }
+        val option = parsed.option ?: return@forEach
+        if (merged.containsKey(option.symbol)) duplicateCount += 1
+        merged.remove(option.symbol)
+        merged[option.symbol] = option
+    }
+
+    val options = KernelSupport.normalizeCustomKernelOptions(merged.values.toList())
+    return CustomKernelOptionsImportResult(
+        options = options,
+        importedCount = options.size,
+        skippedCount = skippedCount,
+        duplicateCount = duplicateCount
+    )
+}
+
+internal fun summarizeCustomKernelOptions(options: List<CustomKernelOption>): CustomKernelOptionSummary {
+    var enabled = 0
+    var disabled = 0
+    var ignored = 0
+    options.forEach { option ->
+        when (CustomKernelOptionMode.normalize(option.mode)) {
+            CustomKernelOptionMode.ENABLED_Y,
+            CustomKernelOptionMode.ENABLED_M,
+            CustomKernelOptionMode.RAW -> enabled += 1
+            CustomKernelOptionMode.DISABLED -> disabled += 1
+            else -> ignored += 1
+        }
+    }
+    return CustomKernelOptionSummary(
+        total = options.size,
+        enabled = enabled,
+        disabled = disabled,
+        ignored = ignored
+    )
+}
+
+internal fun mergeCustomKernelOptions(
+    options: List<CustomKernelOption>,
+    updates: List<CustomKernelOption>
+): List<CustomKernelOption> {
+    if (updates.isEmpty()) return options
+    return KernelSupport.normalizeCustomKernelOptions(options + updates)
+}
+
+internal fun removeCustomKernelOptionsAtIndices(
+    options: List<CustomKernelOption>,
+    indices: Collection<Int>
+): List<CustomKernelOption> {
+    if (options.isEmpty() || indices.isEmpty()) return options
+    val targetIndices = indices.filter { it in options.indices }.toSet()
+    if (targetIndices.isEmpty()) return options
+    return options.filterIndexed { index, _ ->
+        index !in targetIndices
+    }
+}
+
+internal fun CustomKernelOption.toWorkflowLine(): String? {
+    val symbol = KernelSupport.normalizeCustomKernelSymbol(symbol)
+    if (symbol.isBlank()) return null
+    return when (CustomKernelOptionMode.normalize(mode)) {
+        CustomKernelOptionMode.ENABLED_Y -> "$symbol=y"
+        CustomKernelOptionMode.ENABLED_M -> "$symbol=m"
+        CustomKernelOptionMode.DISABLED -> "# $symbol is not set"
+        CustomKernelOptionMode.RAW -> rawValue.trim().takeIf { it.isNotBlank() }?.let { "$symbol=$it" }
+        else -> null
+    }
+}
+
 private const val LATE_FAILED_ARTIFACT_POLL_ATTEMPTS = 6
 private const val LATE_FAILED_ARTIFACT_POLL_INTERVAL_MS = 5_000L
 
 private const val BUILD_PLAN_CODE_PREFIX = "ABKP2:"
 private const val BUILD_PLAN_LEGACY_CODE_PREFIX = "ABKP1:"
-private const val BUILD_PLAN_CODE_VERSION = 6
+private const val BUILD_PLAN_CODE_VERSION = 8
 private const val BUILD_PLAN_MIN_SUPPORTED_VERSION = 2
 private const val BUILD_PLAN_CUSTOM_REF_VERSION = 3
 private const val BUILD_PLAN_ONEPLUS_FIELDS_VERSION = 4
 private const val BUILD_PLAN_KSU_BRANCH_V5_VERSION = 5
 private const val BUILD_PLAN_MODULE_METADATA_VERSION = 6
+private const val BUILD_PLAN_KERNEL_OPTIONS_VERSION = 7
+private const val BUILD_PLAN_CUSTOM_SOURCE_FIELDS_VERSION = 8
 private const val BUILD_PLAN_NAME_LIMIT = 80
 private const val BUILD_PLAN_MAX_STRING_BYTES = 4096
 private const val BUILD_PLAN_MAX_MODULES = 32
+private const val BUILD_PLAN_MAX_KERNEL_OPTIONS = 256
+private const val BUILD_PLAN_MAX_DEFCONFIGS = 128
 private const val OFFICIAL_BUILD_MODULE_CATALOG_ID = "official-abk-module-catalog"
 private const val OFFICIAL_BUILD_MODULE_CATALOG_URL = "https://github.com/xingguangcuican6666/ABK_repo"
 
@@ -5003,6 +6286,7 @@ private val BUILD_PLAN_MODULE_STAGES = listOf(
     CustomExternalModuleStage.AFTER_PATCH,
     CustomExternalModuleStage.BEFORE_BUILD
 )
+private val BUILD_PLAN_KERNEL_OPTION_MODES = CustomKernelOptionMode.options
 
 private const val BUILD_SUMMARY_STEP_NAME = "\u6784\u5efa\u4fe1\u606f\u6458\u8981"
 private const val BUILD_SUMMARY_HEADER = "\u5185\u6838\u6784\u5efa\u914d\u7f6e\u6458\u8981"
@@ -5291,6 +6575,35 @@ private fun WorkflowRun.toBuildStatus(): BuildStatus = when (status) {
 // Helper to convert KernelBuildConfig to workflow dispatch inputs map
 internal fun KernelBuildConfig.toInputMap(): Map<String, String> {
     val config = KernelSupport.normalize(this)
+    if (config.buildTarget == BUILD_TARGET_CUSTOM_SOURCE) {
+        return mapOf(
+            "source_repo" to config.sourceUrl,
+            "source_ref" to config.sourceRef,
+            "source_private" to (config.sourceAccessMode == SOURCE_ACCESS_GITHUB_PRIVATE).toString(),
+            "defconfigs" to config.sourceDefconfigs.joinToString("\n"),
+            "device_label" to config.sourceDeviceLabel,
+            "os_patch_level" to config.osPatchLevel,
+            "kernelsu_variant" to config.kernelsuVariant,
+            "kernelsu_branch" to config.kernelsuBranch,
+            "custom_ref" to if (config.kernelsuBranch == KSU_BRANCH_CUSTOM) config.customRef else "",
+            "version" to config.version,
+            "build_time" to config.buildTime,
+            "virtualization_support" to config.virtualizationSupport,
+            "use_zram" to config.useZram.toString(),
+            "use_bbg" to config.useBbg.toString(),
+            "use_ddk" to config.useDdk.toString(),
+            "use_ntsync" to config.useNtsync.toString(),
+            "use_networking" to config.useNetworking.toString(),
+            "use_kpm" to config.useKpm.toString(),
+            "use_rekernel" to config.useRekernel.toString(),
+            "cancel_susfs" to config.cancelSusfs.toString(),
+            "zram_full_algo" to config.zramFullAlgo.toString(),
+            "zram_extra_algos" to config.zramExtraAlgos,
+            "kpm_password" to config.kpmPassword,
+            "custom_external_modules" to if (config.useCustomExternalModules) config.customExternalModules.toWorkflowInput() else "",
+            "custom_kernel_options" to config.customKernelOptions.mapNotNull { it.toWorkflowLine() }.joinToString("\n"),
+        )
+    }
     if (config.buildTarget == BUILD_TARGET_ONEPLUS) {
         return mapOf(
             "cpu" to config.onePlusCpu,
@@ -5330,7 +6643,9 @@ internal fun KernelBuildConfig.toInputMap(): Map<String, String> {
         "zram_extra_algos" to config.zramExtraAlgos,
         "kpm_password" to config.kpmPassword,
         "virtualization_support" to config.virtualizationSupport,
-        "use_custom_external_modules" to config.useCustomExternalModules.toString(),
+        "custom_kernel_options" to config.customKernelOptions
+            .mapNotNull { it.toWorkflowLine() }
+            .joinToString("\n"),
         "custom_ref" to if (config.kernelsuBranch == KSU_BRANCH_CUSTOM) {
             config.customRef.trim()
         } else {
@@ -5368,11 +6683,13 @@ private fun List<CustomExternalModule>?.toWorkflowInput(): String = this.orEmpty
     .joinToString("|")
 
 private const val KERNEL_WORKFLOW_FILE = "kernel-custom.yml"
+private const val CUSTOM_SOURCE_WORKFLOW_FILE = "kernel-source.yml"
 private const val FORK_ARTIFACT_SIGNING_SECRET_NAME = "ABK_ARTIFACT_SIGNING_KEY_BASE64"
+private const val FORK_CUSTOM_SOURCE_SECRET_NAME = "ABK_CUSTOM_SOURCE_GITHUB_TOKEN"
 private const val FORK_ARTIFACT_SIGNING_RELEASE_TAG = "abk-artifact-key"
 private const val FORK_ARTIFACT_SIGNING_PUBLIC_KEY_ASSET_NAME = "abk-artifact-signing-public.pem"
 private const val ONEPLUS_WORKFLOW_FILE = "oneplus-custom.yml"
-private val buildWorkflowFiles = listOf(KERNEL_WORKFLOW_FILE, ONEPLUS_WORKFLOW_FILE)
+private val buildWorkflowFiles = listOf(KERNEL_WORKFLOW_FILE, CUSTOM_SOURCE_WORKFLOW_FILE, ONEPLUS_WORKFLOW_FILE)
 private const val MIRROR_WORKFLOW_FILE = "mirror-custom-artifacts.yml"
 private val ACTIVE_BUILD_STATUSES = setOf(BuildStatus.QUEUED, BuildStatus.IN_PROGRESS)
 private const val MANAGER_SETTING_APP_PROFILE_TEMPLATES = "app_profile_templates"
@@ -5385,6 +6702,9 @@ private const val MANAGER_SETTING_SULOG = "sulog"
 private const val MANAGER_SETTING_SELINUX_HIDE = "selinux_hide"
 private const val MANAGER_SETTING_DEFAULT_UMOUNT = "default_umount_modules"
 private const val MANAGER_SETTING_WEBVIEW_DEBUG = "webview_debug"
+private const val MANAGER_SETTING_SUSFS = "susfs_control"
+private const val MANAGER_SETTING_KERNEL_CAPABILITIES = "kernel_capabilities"
+private const val KERNEL_CAPABILITY_TCP_CONGESTION = "tcp_congestion"
 private const val MANAGER_TOOL_SELINUX_MODE = "selinux_mode"
 private const val MANAGER_TOOL_BACKUP_ALLOWLIST = "backup_allowlist"
 private const val MANAGER_TOOL_RESTORE_ALLOWLIST = "restore_allowlist"
@@ -5399,10 +6719,10 @@ private data class ManagerSettingsLoad(
 private data class Quadruple<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
 
 private fun workflowFileFor(config: KernelBuildConfig): String =
-    if (KernelSupport.normalizeBuildTarget(config.buildTarget) == BUILD_TARGET_ONEPLUS) {
-        ONEPLUS_WORKFLOW_FILE
-    } else {
-        KERNEL_WORKFLOW_FILE
+    when (KernelSupport.normalizeBuildTarget(config.buildTarget)) {
+        BUILD_TARGET_ONEPLUS -> ONEPLUS_WORKFLOW_FILE
+        BUILD_TARGET_CUSTOM_SOURCE -> CUSTOM_SOURCE_WORKFLOW_FILE
+        else -> KERNEL_WORKFLOW_FILE
     }
 
 /**
@@ -5539,6 +6859,11 @@ private data class ThemePreferences(
     val dynamicColorEnabled: Boolean,
     val customThemeColorArgb: Int?,
     val customAccentColorArgb: Int?
+)
+
+private data class SecuritySigningPreferences(
+    val enabled: Boolean,
+    val configured: Boolean,
 )
 
 private data class BackgroundPreferences(
