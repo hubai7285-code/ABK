@@ -69,7 +69,9 @@ jobs:
           unzip -q "$RUNNER_TEMP/cmdtools.zip" -d "$ANDROID_SDK_ROOT/cmdline-tools"
           mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
+          # `yes` 在 sdkmanager 读完后会被 SIGPIPE 终止(退出码 141)，在 pipefail 下会被误判为失败；
+          # 因此显式吞掉该退出码（否则本步骤会在 "All SDK package licenses accepted" 之后报 exit code 1）。
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 || true
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --channel=3 \
             "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.22.1" "ndk;28.2.13676358"
           {
