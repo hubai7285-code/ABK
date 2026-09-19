@@ -127,6 +127,11 @@ on:
         required: false
         type: string
         default: ""
+      kernel_suffix:
+        description: "自定义内核后缀 (留空=默认, 开头别加连字符, 勿加空格等影响指令运行的保留字符)"
+        required: false
+        type: string
+        default: ""
       build_time:
         description: "自定义构建时间 (如 'Tue Mar 10 03:53:33 UTC 2026', 留空=当前 UTC)"
         required: false
@@ -234,6 +239,7 @@ jobs:
       kernelsu_branch: ${{ inputs.kernelsu_branch }}
       custom_ref: ${{ inputs.custom_ref || '' }}
       version: ${{ inputs.version || '' }}
+      kernel_suffix: ${{ inputs.kernel_suffix || '' }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
