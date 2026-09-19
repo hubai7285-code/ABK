@@ -473,8 +473,13 @@ jobs:
         run: |
           set -euo pipefail
           COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          FENGCHI_PATCH="$GITHUB_WORKSPACE/.github/patches/fengchi.patch"
+          if [ ! -f "$FENGCHI_PATCH" ]; then
+            echo "::error::未找到风驰(hmbird)补丁: $FENGCHI_PATCH"
+            exit 1
+          fi
+          cp "$FENGCHI_PATCH" "$COMMON_ROOT/fengchi.patch"
           cd "$COMMON_ROOT"
-          curl -fsSL "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/main/other_patch/fengchi.patch" -o fengchi.patch
           if [ "$KERNEL_VERSION" != "6.6" ]; then
             echo "::warning::风驰(hmbird)补丁基于 android15/6.6 制作, 当前内核为 $KERNEL_VERSION, 部分 hunk 可能跳过或失败。"
           fi
