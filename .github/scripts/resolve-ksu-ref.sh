@@ -222,6 +222,9 @@ resolve_latest() {
     ReSukiSU)
       repo="ReSukiSU/ReSukiSU"
       ;;
+    KernelSU-Next)
+      repo="pershoot/KernelSU-Next"
+      ;;
     *)
       echo "::error::Unknown KSU variant for Latest: ${KSU_VARIANT}" >&2
       exit 1
@@ -303,6 +306,10 @@ case "$KSU_VARIANT" in
   ReSukiSU)
     BRANCH="${RESUKISU_REF}"
     RESOLVED_KSU_REPO="${RESOLVED_KSU_REPO:-ReSukiSU/ReSukiSU}"
+    ;;
+  KernelSU-Next)
+    BRANCH="dev-susfs"
+    RESOLVED_KSU_REPO="${RESOLVED_KSU_REPO:-pershoot/KernelSU-Next}"
     ;;
   *)
     echo "::error::Unknown KSU variant: ${KSU_VARIANT}" >&2
