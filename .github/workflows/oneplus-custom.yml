@@ -140,21 +140,12 @@ on:
         required: false
         type: boolean
         default: false
-      sub_level:
-        description: "子版本号 (如 66, 198, X; OnePlus 仅作为产物/版本元数据)"
-        required: false
-        type: string
-        default: ""
-      os_patch_level:
-        description: "安全补丁级别 (如 2024-05, lts; OnePlus 仅作为产物/版本元数据)"
-        required: false
-        type: string
-        default: ""
-      revision:
-        description: "修订版本 (如 r11; OnePlus 仅作为产物/版本元数据)"
-        required: false
-        type: string
-        default: ""
+      # ===== 注意: workflow_dispatch 最多只能定义 25 个 inputs =====
+      # 因此对齐 kernel-custom.yml 时做了合并/取舍:
+      #   - sub_level / os_patch_level / revision: OnePlus 由 manifest 决定, 仅元数据, 不在此暴露
+      #     (oneplus-build.yml 仍保留同名 workflow_call 输入, 供可复用工作流直接调用)
+      #   - virtualization_support / supp_op: OnePlus 内核树无对应补丁, 属无效项, 不在此暴露
+      #   - use_zram + zram_full_algo + zram_extra_algos: 合并为 zram_mode
       kernelsu_branch:
         description: "KSU 分支"
         required: false
@@ -180,22 +171,11 @@ on:
         required: false
         type: string
         default: ""
-      virtualization_support:
-        description: "虚拟化支持 (OnePlus 树暂不支持, 将跳过并警告)"
+      zram_mode:
+        description: "ZRAM 模式: off | enhanced | full | custom:lzo,lz4,zstd"
         required: false
-        type: choice
-        options:
-          - "off"
-          - "on"
-          - "678"
-          - "123"
-          - "345"
+        type: string
         default: "off"
-      use_zram:
-        description: "启用 ZRAM 增强算法 (lz4/lz4hc/lzo/842/zstd)"
-        required: false
-        type: boolean
-        default: false
       use_ddk:
         description: "启用 DDK 防格机 LSM"
         required: false
@@ -216,21 +196,6 @@ on:
         required: false
         type: boolean
         default: false
-      supp_op:
-        description: "启用一加 8E 支持 (OnePlus 树暂不支持, 将跳过并警告)"
-        required: false
-        type: boolean
-        default: false
-      zram_full_algo:
-        description: "启用 ZRAM 完整算法支持 (lz4kd/lz4k_oplus/zram_writeback)"
-        required: false
-        type: boolean
-        default: false
-      zram_extra_algos:
-        description: "自定义 ZRAM 算法（逗号分隔, 如 lzo,lz4,zstd; 跳过 lz4k/lz4kd/lz4k_oplus）"
-        required: false
-        type: string
-        default: ""
       kpm_password:
         description: "自定义 KPM 超级密码（留空=默认）"
         required: false
@@ -276,22 +241,15 @@ jobs:
       use_proxy_optimization: ${{ inputs.use_proxy_optimization }}
       use_unicode_bypass: ${{ inputs.use_unicode_bypass }}
       use_fengchi: ${{ inputs.use_fengchi }}
-      sub_level: ${{ inputs.sub_level }}
-      os_patch_level: ${{ inputs.os_patch_level }}
-      revision: ${{ inputs.revision }}
       kernelsu_branch: ${{ inputs.kernelsu_branch }}
       custom_ref: ${{ inputs.custom_ref }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time }}
-      virtualization_support: ${{ inputs.virtualization_support }}
-      use_zram: ${{ inputs.use_zram }}
+      zram_mode: ${{ inputs.zram_mode }}
       use_ddk: ${{ inputs.use_ddk }}
       use_ntsync: ${{ inputs.use_ntsync }}
       use_networking: ${{ inputs.use_networking }}
       use_rekernel: ${{ inputs.use_rekernel }}
-      supp_op: ${{ inputs.supp_op }}
-      zram_full_algo: ${{ inputs.zram_full_algo }}
-      zram_extra_algos: ${{ inputs.zram_extra_algos }}
       kpm_password: ${{ inputs.kpm_password }}
       custom_external_modules: ${{ inputs.custom_external_modules }}
       custom_kernel_options: ${{ inputs.custom_kernel_options }}
