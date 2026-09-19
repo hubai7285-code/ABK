@@ -194,7 +194,7 @@ jobs:
           echo "Stock Config  : OnePlus manifest"
           echo "Unicode 绕过  : $USE_UNICODE_BYPASS"
           echo "风驰调度器    : $USE_FENGCHI"
-          echo "GKI 性能优化  : 已启用(-O2 / 放开 KMI 保护导出)"
+          echo "GKI 内核优化  : 已启用(放开 KMI 保护导出 / 关闭 defconfig 检查, 对齐 build.yml)"
           echo "========================================"
 
       - name: 校验 OnePlus 输入
@@ -485,22 +485,23 @@ jobs:
           grep -q '^CONFIG_HMBIRD_SCHED=y' arch/arm64/configs/gki_defconfig || echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           echo "风驰补丁处理完成(部分 hunk 因内核差异跳过属正常现象)。"
 
-      - name: GKI 内核性能优化
+      - name: GKI 内核优化（对齐 build.yml）
         shell: bash
         run: |
           set -euo pipefail
           COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
           KPLATFORM="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform"
-          DEFCONFIG_PATH="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
-          # 移除 GKI KMI 受保护导出符号, 放开定制空间
+          # 对齐 ABK build.yml 的 GKI 优化：放开 GKI KMI 受保护导出符号与 defconfig 一致性检查
+          # 1) 禁用 defconfig 一致性检查（build.yml: sed -i 's/check_defconfig//' ./common/build.config.gki）
+          sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
+          # 2) 放开 KMI 受保护导出（build.yml: 移除 BUILD.bazel 中 protected_exports_list / kmi_symbol_list_strict_mode，并删除 abi_gki_protected_exports_*）
+          if [ -f "$COMMON_ROOT/BUILD.bazel" ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' "$COMMON_ROOT/BUILD.bazel"
+            sed -i '/kmi_symbol_list_strict_mode/d' "$COMMON_ROOT/BUILD.bazel"
+          fi
           rm -f "$COMMON_ROOT"/android/abi_gki_protected_exports_* || true
           rm -f "$KPLATFORM"/msm-kernel/android/abi_gki_protected_exports_* || true
-          # 性能优化: 使用 -O2 而非 -Os
-          sed -i 's/^CONFIG_CC_OPTIMIZE_FOR_SIZE=y/# CONFIG_CC_OPTIMIZE_FOR_SIZE is not set/' "$DEFCONFIG_PATH" || true
-          grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y' "$DEFCONFIG_PATH" || echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG_PATH"
-          # 关闭 defconfig 一致性检查, 允许定制
-          sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
-          echo "GKI 性能优化已应用(-O2 / 放开 KMI 保护导出)。"
+          echo "GKI KMI 保护导出与 defconfig 检查已放开(对齐 build.yml)。"
 
       - name: 确保 KernelSU ABI 兼容
         if: ${{ inputs.ksu_variant != 'None' }}
