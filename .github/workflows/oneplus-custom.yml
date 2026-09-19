@@ -97,6 +97,7 @@ on:
           - Official
           - SukiSU
           - ReSukiSU
+          - KernelSU-Next
           - None
         default: SukiSU
       enable_susfs:
@@ -134,6 +135,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_fengchi:
+        description: "启用风驰(hmbird)调度器补丁(仅推荐 android15/6.6)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   get-manager:
@@ -161,3 +167,4 @@ jobs:
       use_bbr: ${{ inputs.use_bbr }}
       use_proxy_optimization: ${{ inputs.use_proxy_optimization }}
       use_unicode_bypass: ${{ inputs.use_unicode_bypass }}
+      use_fengchi: ${{ inputs.use_fengchi }}
