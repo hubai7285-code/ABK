@@ -167,13 +167,8 @@ on:
         required: false
         type: boolean
         default: false
-      cancel_susfs:
-        description: "禁用 SUSFS（取消勾选=启用 SUSFS；仅 android14/6.1、android15/6.6、android16/6.12 支持）"
-        required: false
-        type: boolean
-        default: false
-      supp_op:
-        description: "启用一加 8E 支持（OnePlus 树通常已内置，无独立补丁时自动跳过）"
+      enable_susfs:
+        description: "启用 SUSFS（仅 android14/6.1、android15/6.6、android16/6.12 支持）"
         required: false
         type: boolean
         default: false
@@ -247,9 +242,7 @@ jobs:
       use_networking: ${{ inputs.use_networking || false }}
       use_kpm: ${{ inputs.use_kpm }}
       use_rekernel: ${{ inputs.use_rekernel || false }}
-      cancel_susfs: ${{ inputs.cancel_susfs }}
-      enable_susfs: ${{ !inputs.cancel_susfs }}
-      supp_op: ${{ inputs.supp_op || false }}
+      enable_susfs: ${{ inputs.enable_susfs }}
       zram_full_algo: ${{ inputs.zram_full_algo || false }}
       zram_extra_algos: ${{ inputs.zram_extra_algos || '' }}
       kpm_password: ${{ inputs.kpm_password || '' }}
