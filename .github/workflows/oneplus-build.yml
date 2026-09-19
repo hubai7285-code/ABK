@@ -23,11 +23,7 @@ on:
         required: true
         type: string
       enable_susfs:
-        required: false
-        type: boolean
-        default: false
-      cancel_susfs:
-        description: "禁用 SUSFS (对齐 GKI 的 cancel_susfs; 勾选=关闭 SUSFS)"
+        description: "启用 SUSFS (仅 android14/6.1、android15/6.6、android16/6.12 支持)"
         required: false
         type: boolean
         default: false
@@ -136,11 +132,6 @@ on:
         required: false
         type: boolean
         default: false
-      supp_op:
-        description: "启用一加 8E 支持 (OnePlus 树通常已内置, 未找到补丁时跳过并警告)"
-        required: false
-        type: boolean
-        default: false
       kpm_password:
         description: "自定义 KPM 超级密码 (留空=使用默认密码)"
         required: false
@@ -170,7 +161,6 @@ jobs:
       KERNEL_VERSION: ${{ inputs.kernel_version }}
       KSU_VARIANT: ${{ inputs.ksu_variant }}
       ENABLE_SUSFS: ${{ inputs.enable_susfs }}
-      CANCEL_SUSFS: ${{ inputs.cancel_susfs }}
       USE_KPM: ${{ inputs.use_kpm }}
       USE_LZ4KD: ${{ inputs.use_lz4kd }}
       USE_BBG: ${{ inputs.use_bbg }}
@@ -193,7 +183,6 @@ jobs:
       USE_NTSYNC: ${{ inputs.use_ntsync }}
       USE_NETWORKING: ${{ inputs.use_networking }}
       USE_REKERNEL: ${{ inputs.use_rekernel }}
-      SUPP_OP: ${{ inputs.supp_op }}
       KPM_PASSWORD: ${{ inputs.kpm_password }}
       CUSTOM_EXTERNAL_MODULES: ${{ inputs.custom_external_modules }}
       CUSTOM_KERNEL_OPTIONS: ${{ inputs.custom_kernel_options }}
@@ -215,10 +204,6 @@ jobs:
             case "$(printf '%s' "$ZRAM_EXTRA_ALGOS" | tr '[:upper:]' '[:lower:]')" in
               *lz4kd*|*lz4k_oplus*) effective_lz4kd="true" ;;
             esac
-          fi
-          if [ "$CANCEL_SUSFS" = "true" ]; then
-            echo "已勾选禁用 SUSFS (cancel_susfs=true), 本次构建关闭 SUSFS。"
-            ENABLE_SUSFS="false"
           fi
           if [ "$KSU_VARIANT" != "SukiSU" ] && [ "$KSU_VARIANT" != "ReSukiSU" ]; then
             effective_kpm="false"
@@ -312,7 +297,7 @@ jobs:
           echo "KSU 自定义引用: ${CUSTOM_REF:-默认}"
           echo "构建时间      : ${BUILD_TIME:-OnePlus upstream}"
           echo "自定义版本    : ${ABK_VERSION:-默认}"
-          echo "SUSFS 状态    : $ENABLE_SUSFS (禁用SUSFS=$CANCEL_SUSFS)"
+          echo "SUSFS 状态    : $ENABLE_SUSFS"
           echo "ZRAM 增强     : $USE_ZRAM (lz4kd=$effective_lz4kd)"
           echo "ZRAM 完整算法 : $ZRAM_FULL_ALGO"
           echo "ZRAM 额外算法 : ${ZRAM_EXTRA_ALGOS:-无}"
@@ -324,7 +309,6 @@ jobs:
           echo "KPM 密码      : $([ -n "$KPM_PASSWORD" ] && echo '已自定义' || echo '默认')"
           echo "Re-Kernel     : $USE_REKERNEL"
           echo "虚拟化支持   : $VIRTUALIZATION_SUPPORT (OnePlus 树不支持, 忽略)"
-          echo "一加 8E 支持  : $SUPP_OP (OnePlus 树不支持, 忽略)"
           echo "自定义内核选项: $([ -n "$CUSTOM_KERNEL_OPTIONS" ] && echo '有' || echo '无')"
           echo "外部模块      : $([ -n "$CUSTOM_EXTERNAL_MODULES" ] && echo '有' || echo '无')"
           echo "Stock Config  : OnePlus manifest"
@@ -362,9 +346,6 @@ jobs:
           set -euo pipefail
           if [ "$VIRTUALIZATION_SUPPORT" != "off" ]; then
             echo "::warning::OnePlus 内核树当前不包含 GKI 虚拟化支持补丁 (virtualization_support), 该选项将被忽略。"
-          fi
-          if [ "$SUPP_OP" = "true" ]; then
-            echo "::warning::OnePlus 内核树通常已内置一加 8E 支持, 未找到独立补丁 (supp_op) 时该选项不额外生效。"
           fi
 
       - name: 最大化构建空间
