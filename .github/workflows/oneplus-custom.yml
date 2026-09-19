@@ -255,6 +255,8 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.ksu_variant }}
+      ksu_branch: ${{ inputs.kernelsu_branch }}
+      custom_ref: ${{ inputs.custom_ref || '' }}
 
   build-oneplus-kernel:
     name: "${{ inputs.device_manifest }}-${{ inputs.kernel_version }}-${{ inputs.ksu_variant }}"
